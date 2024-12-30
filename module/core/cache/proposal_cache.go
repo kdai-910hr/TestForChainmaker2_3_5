@@ -38,7 +38,6 @@ type blockProposal struct {
 	contractEventInfoMap map[string][]*commonpb.ContractEvent
 	isSelfProposed       bool // is this block proposed by this node
 	hasProposedThisRound bool // for *BFT consensus, only propose once at a round.
-	//scheduleMethod       int  // 1 for DAG, 2 for Spectrum, 3 for ...
 }
 
 // NewProposalCache get a ProposalCache.

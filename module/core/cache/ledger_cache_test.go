@@ -85,7 +85,8 @@ func CreateNewTestBlock(height uint64) *commonpb.Block {
 		Dag: &commonpb.DAG{
 			Vertexes: nil,
 		},
-		Txs: nil,
+		Method: 1,
+		Txs:    nil,
 	}
 	tx := CreateNewTestTx()
 	txs := make([]*commonpb.Transaction, 1)

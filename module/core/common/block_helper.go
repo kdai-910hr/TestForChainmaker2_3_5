@@ -277,8 +277,9 @@ func initNewBlock(
 			TxCount:        0,
 			Signature:      nil,
 		},
-		Dag: &commonPb.DAG{},
-		Txs: nil,
+		Dag:    &commonPb.DAG{},
+		Txs:    nil,
+		Method: 1,
 		AdditionalData: &commonPb.AdditionalData{
 			ExtraData: make(map[string][]byte),
 		},
@@ -1361,6 +1362,7 @@ func recoverBlockByBatch(
 			Header:         block.Header,
 			Dag:            block.Dag,
 			Txs:            make([]*commonPb.Transaction, block.Header.TxCount),
+			Method:         block.Method,
 			AdditionalData: block.AdditionalData,
 		}
 
@@ -1400,6 +1402,7 @@ func recoverBlockByBatch(
 				Header:         block.Header,
 				Dag:            block.Dag,
 				Txs:            block.Txs,
+				Method:         block.Method,
 				AdditionalData: block.AdditionalData,
 			}, batchIds, nil
 		}
@@ -1459,6 +1462,7 @@ func recoverBlockByBatch(
 		Header:         block.Header,
 		Dag:            block.Dag,
 		Txs:            block.Txs,
+		Method:         block.Method,
 		AdditionalData: block.AdditionalData,
 	}, batchIds, nil
 }
@@ -1480,6 +1484,7 @@ func recoverBlock(
 			Header:         block.Header,
 			Dag:            block.Dag,
 			Txs:            make([]*commonPb.Transaction, len(block.Txs)),
+			Method:         block.Method,
 			AdditionalData: block.AdditionalData,
 		}
 
@@ -1526,6 +1531,7 @@ func recoverBlock(
 		Header:         block.Header,
 		Dag:            block.Dag,
 		Txs:            block.Txs,
+		Method:         block.Method,
 		AdditionalData: block.AdditionalData,
 	}, nil, nil
 
@@ -1764,6 +1770,7 @@ func CopyBlock(block *commonPb.Block) *commonPb.Block {
 		Header:         block.Header,
 		Dag:            block.Dag,
 		Txs:            block.Txs,
+		Method:         block.Method,
 		AdditionalData: block.AdditionalData,
 	}
 }

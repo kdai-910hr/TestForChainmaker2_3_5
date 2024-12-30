@@ -79,6 +79,8 @@ require (
 )
 
 replace (
+	chainmaker.org/chainmaker/consensus-tbft/v2 v2.3.5 => ./module/consensus/tbft
+	chainmaker.org/chainmaker/pb-go/v2 v2.3.6 => ./utils/pb-go
 	github.com/RedisBloom/redisbloom-go => chainmaker.org/third_party/redisbloom-go v1.0.0
 	github.com/dgraph-io/badger/v3 => chainmaker.org/third_party/badger/v3 v3.0.0
 	github.com/libp2p/go-conn-security-multistream v0.2.0 => chainmaker.org/third_party/go-conn-security-multistream v1.0.5
