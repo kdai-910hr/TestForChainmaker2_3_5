@@ -277,9 +277,8 @@ func initNewBlock(
 			TxCount:        0,
 			Signature:      nil,
 		},
-		Dag:    &commonPb.DAG{},
-		Txs:    nil,
-		Method: 1,
+		Dag: &commonPb.DAG{},
+		Txs: nil,
 		AdditionalData: &commonPb.AdditionalData{
 			ExtraData: make(map[string][]byte),
 		},
@@ -537,6 +536,14 @@ func CheckBlockDigests(block *commonPb.Block, txHashes [][]byte, hashType string
 	if err := IsRWSetHashValid(block, hashType); err != nil {
 		log.Error(err)
 		return err
+	}
+	//TODO 交易的读写依赖校验通过，DAG的校验也已经通过
+	// 因此可以将读写依赖带入算法代价模型中计算，检验ConsensusArgs中的决策是否正确
+	consensusArgs := &consensus.BlockHeaderConsensusArgs{}
+	if err := proto.Unmarshal(block.Header.ConsensusArgs, consensusArgs); err != nil {
+		return fmt.Errorf("unmarshal shedule method args from blockHeader failed,reason: %s ", err)
+	} else {
+		log.Debug("ZYF Validate schedule method args from blockHeader success: ", consensusArgs.ConsensusType)
 	}
 	return nil
 }
@@ -1362,7 +1369,6 @@ func recoverBlockByBatch(
 			Header:         block.Header,
 			Dag:            block.Dag,
 			Txs:            make([]*commonPb.Transaction, block.Header.TxCount),
-			Method:         block.Method,
 			AdditionalData: block.AdditionalData,
 		}
 
@@ -1402,7 +1408,6 @@ func recoverBlockByBatch(
 				Header:         block.Header,
 				Dag:            block.Dag,
 				Txs:            block.Txs,
-				Method:         block.Method,
 				AdditionalData: block.AdditionalData,
 			}, batchIds, nil
 		}
@@ -1462,7 +1467,6 @@ func recoverBlockByBatch(
 		Header:         block.Header,
 		Dag:            block.Dag,
 		Txs:            block.Txs,
-		Method:         block.Method,
 		AdditionalData: block.AdditionalData,
 	}, batchIds, nil
 }
@@ -1484,7 +1488,6 @@ func recoverBlock(
 			Header:         block.Header,
 			Dag:            block.Dag,
 			Txs:            make([]*commonPb.Transaction, len(block.Txs)),
-			Method:         block.Method,
 			AdditionalData: block.AdditionalData,
 		}
 
@@ -1531,7 +1534,6 @@ func recoverBlock(
 		Header:         block.Header,
 		Dag:            block.Dag,
 		Txs:            block.Txs,
-		Method:         block.Method,
 		AdditionalData: block.AdditionalData,
 	}, nil, nil
 
@@ -1770,7 +1772,6 @@ func CopyBlock(block *commonPb.Block) *commonPb.Block {
 		Header:         block.Header,
 		Dag:            block.Dag,
 		Txs:            block.Txs,
-		Method:         block.Method,
 		AdditionalData: block.AdditionalData,
 	}
 }

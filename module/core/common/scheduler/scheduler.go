@@ -182,7 +182,10 @@ func (ts *TxScheduler) Schedule(block *commonPb.Block, txBatch []*commonPb.Trans
 	block.Dag = snapshot.BuildDAG(ts.chainConf.ChainConfig().Contract.EnableSqlSupport, nil)
 	// ZYF BuildDAG 应该返回应当使用哪种调度策略 1,2,...
 	//block.Dag, block.ScheduleMethod = snapshot.BuildDAG(ts.chainConf.ChainConfig().Contract.EnableSqlSupport, nil)
-	block.Method = 1
+	methodArgsData, err := proto.Marshal(&consensus.BlockHeaderConsensusArgs{
+		ConsensusType: int64(consensus.ConsensusType_MAXBFT),
+	})
+	block.Header.ConsensusArgs = methodArgsData
 
 	ts.handleSpecialTxs(blockVersion, block, snapshot, txBatchSize, senderCollection, enableOptimizeChargeGas)
 
