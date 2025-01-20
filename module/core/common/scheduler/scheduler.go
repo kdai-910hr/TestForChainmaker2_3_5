@@ -180,8 +180,8 @@ func (ts *TxScheduler) Schedule(block *commonPb.Block, txBatch []*commonPb.Trans
 	snapshot.Seal()
 	timeCostA := time.Since(startTime)
 	block.Dag = snapshot.BuildDAG(ts.chainConf.ChainConfig().Contract.EnableSqlSupport, nil)
-	// ZYF BuildDAG 应该返回应当使用哪种调度策略 1,2,...
-	//block.Dag, block.ScheduleMethod = snapshot.BuildDAG(ts.chainConf.ChainConfig().Contract.EnableSqlSupport, nil)
+	// TODO ZYF BuildDAG或者走一个代价模型，应该返回应当使用哪种调度策略 1,2,...
+	// 然后将这个策略写入到block.AdditionalData中
 	methodArgsData, err := proto.Marshal(&consensus.BlockHeaderConsensusArgs{
 		ConsensusType: int64(consensus.ConsensusType_MAXBFT),
 	})
