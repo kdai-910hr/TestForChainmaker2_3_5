@@ -47,6 +47,11 @@ const (
 )
 
 const (
+	// ZYF 这块实际是应该加在consensus-tbft/v2@v2.3.5/consensus_tbft_impl.go中的
+	TBFTAdditionalDataSchedule = "TBFTAdditionalDataSchedule"
+)
+
+const (
 	ErrMsgOfGasLimitNotSet = "field `GasLimit` must be set in payload."
 )
 
@@ -182,11 +187,8 @@ func (ts *TxScheduler) Schedule(block *commonPb.Block, txBatch []*commonPb.Trans
 	block.Dag = snapshot.BuildDAG(ts.chainConf.ChainConfig().Contract.EnableSqlSupport, nil)
 	// TODO ZYF BuildDAG或者走一个代价模型，应该返回应当使用哪种调度策略 1,2,...
 	// 然后将这个策略写入到block.AdditionalData中
-	methodArgsData, err := proto.Marshal(&consensus.BlockHeaderConsensusArgs{
-		ConsensusType: int64(consensus.ConsensusType_MAXBFT),
-	})
-	block.Header.ConsensusArgs = methodArgsData
-
+	block.AdditionalData.ExtraData[TBFTAdditionalDataSchedule] = []byte("1")
+	ts.log.Infof("ZYF add schedule method args to block additional data success: ", 1)
 	ts.handleSpecialTxs(blockVersion, block, snapshot, txBatchSize, senderCollection, enableOptimizeChargeGas)
 
 	// if the block is not empty, append the charging gas tx
