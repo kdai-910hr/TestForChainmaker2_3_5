@@ -24,6 +24,8 @@ import (
 	"chainmaker.org/chainmaker/utils/v2"
 )
 
+var enableBatch bool = true
+
 // The record value is written by the SEQ corresponding to TX
 type sv struct {
 	seq   int
@@ -353,29 +355,65 @@ func (s *SnapshotImpl) ApplyTxSimContext(txSimContext protocol.TxSimContext, spe
 	var txRWSet *commonPb.TxRWSet
 	var txResult *commonPb.Result
 
+	if enableBatch {
+		s.log.Info("-------------执行到批处理交易调度代码部分---------")
+	}
 	// Only when the virtual machine is running normally can the read-write set be saved, or write fake conflicted key
 	txRWSet = txSimContext.GetTxRWSet(runVmSuccess)
 	s.log.Debugf("【gas calc】%v, ApplyTxSimContext, txRWSet = %v", txSimContext.GetTx().Payload.TxId, txRWSet)
 	txResult = txSimContext.GetTxResult()
 	// 实现准备好要处理的数据
 	finalReadKvs := make(map[string]*sv, len(txRWSet.TxReads))
-	for _, txRead := range txRWSet.TxReads {
-		finalKey := constructKey(txRead.ContractName, txRead.Key)
-		// 乐观检查，便于提前发现冲突
-		if sv, ok := s.writeTable.getByLock(finalKey); ok {
-			if sv.seq >= txExecSeq {
-				s.log.Debugf("Key Conflicted %+v-%+v, tx id:%s", sv.seq, txExecSeq, tx.Payload.TxId)
-				return false, len(s.txTable) + len(s.specialTxTable)
+	if !enableBatch {
+		for _, txRead := range txRWSet.TxReads {
+			finalKey := constructKey(txRead.ContractName, txRead.Key)
+			// 乐观检查，便于提前发现冲突
+			if sv, ok := s.writeTable.getByLock(finalKey); ok {
+				if sv.seq >= txExecSeq {
+					s.log.Debugf("Key Conflicted %+v-%+v, tx id:%s", sv.seq, txExecSeq, tx.Payload.TxId)
+					return false, len(s.txTable) + len(s.specialTxTable)
+				}
 			}
-		}
-		finalReadKvs[finalKey] = &sv{
-			value: txRead.Value,
+			finalReadKvs[finalKey] = &sv{
+				value: txRead.Value,
+			}
 		}
 	}
 	finalWriteKvs := make(map[string]*sv, len(txRWSet.TxWrites))
-	// Append to write table
+	if enableBatch {
+		//比较交易id大小用交易执行的序号txExecSeq,tx.payload.TxId是字符串不好比较
+		//提交阶段冲突检查，写写不提交，读写和写读可以提交
+		//写写冲突返回false，其余冲突可以提交
+		//检查是否存在WAW冲突
+		for _, txWrite := range txRWSet.TxWrites {
+			finalKey := constructKey(txWrite.ContractName, txWrite.Key)
+			if sv, ok := s.writeTable.getByLock(finalKey); ok {
+				if sv.seq < txExecSeq {
+					fmt.Println("存在WAW冲突")
+					s.log.Debugf("Key Conflicted %+v-%+v, tx id:%s", sv.seq, txExecSeq, tx.Payload.TxId)
+					return false, len(s.txTable) + len(s.specialTxTable)
+				}
+			}
+		}
+
+		//重排序算法，只要有WAR和RAW一种不冲突即可提交
+		if !(hasWARConflicts(txExecSeq, txRWSet, s.readTable) == false ||
+			hasRAWConflicts(txExecSeq, txRWSet, s.writeTable) == false) {
+			fmt.Println("存在冲突，不提交")
+			s.log.Debugf("has conflicts with RAW or WAR, not install")
+			return false, len(s.txTable) + len(s.specialTxTable)
+		}
+
+		//没有冲突才可以生效结果
+		//放到所有检查的最后面，对应install函数
+	}
 	for _, txWrite := range txRWSet.TxWrites {
 		finalKey := constructKey(txWrite.ContractName, txWrite.Key)
+		if enableBatch {
+			//写写不冲突直接生效交易结果
+			fmt.Println("提交结果")
+			s.log.Debugf("tx id:%s 生效", tx.Payload.TxId)
+		}
 		finalWriteKvs[finalKey] = &sv{
 			value: txWrite.Value,
 		}
@@ -403,7 +441,8 @@ func (s *SnapshotImpl) ApplyTxSimContext(txSimContext protocol.TxSimContext, spe
 	start := time.Now()
 	for finalKey := range finalReadKvs {
 		if sv, ok := s.writeTable.getByLock(finalKey); ok {
-			if sv.seq >= txExecSeq {
+			//只保留id小的交易 将>=修改为<
+			if enableBatch && sv.seq < txExecSeq || !enableBatch && sv.seq >= txExecSeq {
 				s.log.Debugf("Key Conflicted %+v-%+v, tx id:%s", sv.seq, txExecSeq, tx.Payload.TxId)
 				return false, s.GetSnapshotSize() + len(s.specialTxTable)
 			}
@@ -413,6 +452,28 @@ func (s *SnapshotImpl) ApplyTxSimContext(txSimContext protocol.TxSimContext, spe
 	s.applyConflictTime.Add(micro)
 	s.applyOptimize(tx, txRWSet, txResult, runVmSuccess, finalReadKvs, finalWriteKvs)
 	return true, s.GetSnapshotSize()
+}
+
+// 检查是否有WAR冲突
+func hasWARConflicts(txExecSeq int, TxRWSet *commonPb.TxRWSet, reservations *ShardSet) bool {
+	for _, txWrite := range TxRWSet.TxWrites {
+		key := constructKey(txWrite.ContractName, txWrite.Key)
+		if sv, ok := reservations.getByLock(key); ok && sv.seq < txExecSeq {
+			return true
+		}
+	}
+	return false
+}
+
+// 检查是否有RAW冲突
+func hasRAWConflicts(txExecSeq int, TxRWSet *commonPb.TxRWSet, reservations *ShardSet) bool {
+	for _, txRead := range TxRWSet.TxReads {
+		key := constructKey(txRead.ContractName, txRead.Key)
+		if sv, ok := reservations.getByLock(key); ok && sv.seq < txExecSeq {
+			return true
+		}
+	}
+	return false
 }
 
 // ApplyBlock apply tx rwset map to block
