@@ -134,10 +134,6 @@ func (s *MockSimContextImpl) GetBlockProposer() *acPb.Member {
 	panic(implement_me)
 }
 
-func (s *MockSimContextImpl) GetTxResult() *commonPb.Result {
-	return s.txResult
-}
-
 func (s *MockSimContextImpl) SetTxResult(result *commonPb.Result) {
 	s.txResult = result
 }
