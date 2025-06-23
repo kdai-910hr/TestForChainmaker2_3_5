@@ -73,6 +73,10 @@ type SnapshotImpl struct {
 	dagHash   []byte
 	rwSetHash []byte
 
+	//wzy
+	//存储注入的读写集
+	AUXRwMap map[string][]sv
+	//lhl
 	staleReadKeys []string // ✅ 新增字段
 }
 
