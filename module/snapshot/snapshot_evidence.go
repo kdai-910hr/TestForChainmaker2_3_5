@@ -226,3 +226,11 @@ func (s *SnapshotEvidence) ApplyBlock(block *commonPb.Block, txRWSetMap map[stri
 	}
 	s.delegate.ApplyBlock(block, txRWSetMap)
 }
+
+// wzy
+func (s *SnapshotEvidence) SetAUXRwMap(AUXRwMapBytes []byte) {
+	if s.delegate == nil {
+		return
+	}
+	s.delegate.SetAUXRwMap(AUXRwMapBytes)
+}

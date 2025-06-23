@@ -43,6 +43,8 @@ func (m *ManagerImpl) NewSnapshot(prevBlock *commonPb.Block, block *commonPb.Blo
 	m.storeAndLinkSnapshotImpl(snapshotImpl, &prevFingerPrint, &fingerPrint)
 
 	snapshotImpl.SetBlockFingerprint(fingerPrint)
+	//wzy
+	snapshotImpl.SetAUXRwMap(block.AdditionalData.ExtraData["AUXRwMap"])
 
 	m.log.Infof(
 		"create snapshot@%s at height %d, fingerPrint[%v] -> prevFingerPrint[%v]",
