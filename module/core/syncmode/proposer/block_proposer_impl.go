@@ -242,12 +242,15 @@ func (bp *BlockProposerImpl) proposeBlock() {
 			bp.proposeTimer.Reset(bp.getDuration())
 		}
 	}()
+
+	// WJY: 获取最后一个已提交的区块
 	lastBlock := bp.ledgerCache.GetLastCommittedBlock()
 	if lastBlock == nil {
 		bp.log.Errorf("no committed block found")
 		return
 	}
 
+	// WJY: 这将是下一个要提议的区块高度
 	proposingHeight := lastBlock.Header.BlockHeight + 1
 	if !bp.shouldProposeByBFT(proposingHeight) {
 		return
@@ -265,6 +268,7 @@ func (bp *BlockProposerImpl) proposeBlock() {
 	}
 	defer bp.setIdle()
 
+	// WJY: 启动一个新的 Goroutine，开始异步提议新块
 	go bp.proposing(proposingHeight, lastBlock.Header.BlockHash)
 	// #DEBUG MODE#
 	if localconf.ChainMakerConfig.DebugConfig.IsHaltPropose {
@@ -281,6 +285,7 @@ func (bp *BlockProposerImpl) proposing(height uint64, preHash []byte) *commonpb.
 	startTick := utils.CurrentTimeMillisSeconds()
 	defer bp.yieldProposing()
 
+	// WJY: 检查当前高度是否有已提议的区块
 	selfProposedBlock := bp.proposalCache.GetSelfProposedBlockAt(height)
 	if selfProposedBlock != nil {
 		if needPropose := bp.dealProposalRequestWithProposalCache(height, selfProposedBlock, preHash); !needPropose {
@@ -305,16 +310,19 @@ func (bp *BlockProposerImpl) proposing(height uint64, preHash []byte) *commonpb.
 		totalTimes++
 		// retrieve tx batch from tx pool
 		fetchFirst := utils.CurrentTimeMillisSeconds()
+		// WJY: 从交易池中获取交易批次
 		batchIds, fetchBatch, fetchBatches = bp.getFetchBatchFromPool(height)
 		fetchLasts += utils.CurrentTimeMillisSeconds() - fetchFirst
 		bp.log.DebugDynamic(filtercommon.LoggingFixLengthFunc("begin proposing block[%d], fetch tx num[%d]",
 			height, len(fetchBatch)))
+		// WJY: 如果交易池为空则退出循环，返回 nil，表示无交易可提议。
 		if len(fetchBatch) == 0 {
 			bp.log.DebugDynamic(filtercommon.LoggingFixLengthFunc("no txs in tx pool, proposing block stoped"))
 			return nil
 		}
 		// validate txFilter rules
 		filterValidateFirst := utils.CurrentTimeMillisSeconds()
+		// WJY: 校验过滤规则，对超时等不符合规则的交易进行筛选
 		removeTxs, remainTxs := common.ValidateTxRules(bp.txFilter, fetchBatch)
 		filterValidateLasts += utils.CurrentTimeMillisSeconds() - filterValidateFirst
 		if len(removeTxs) > 0 {
@@ -332,12 +340,15 @@ func (bp *BlockProposerImpl) proposing(height uint64, preHash []byte) *commonpb.
 	}
 	fetchTotalLasts = utils.CurrentTimeMillisSeconds() - fetchTotalFirst
 
+	// WJY: 如果配置不允许生成空区块，并且 fetchBatch 中没有交易，则返回 nil
 	if !utils.CanProposeEmptyBlock(bp.chainConf.ChainConfig().Consensus.Type) && len(fetchBatch) == 0 {
 		// can not propose empty block and tx batch is empty, then yield proposing.
 		bp.log.Debugf("no txs in tx pool, proposing block stopped")
 		return nil
 	}
 
+	// WJY: 检查 fetchBatch 的交易数量是否超过区块的容量 txCapacity
+	// WJY: 如果超过容量，处理多余交易，将其重新放回交易池，并记录警告日志
 	txCapacity := int(bp.chainConf.ChainConfig().Block.BlockTxCapacity)
 	if len(fetchBatch) > txCapacity {
 		// check if checkedBatch > txCapacity, if so, strict block tx count according to  config,
@@ -356,6 +367,7 @@ func (bp *BlockProposerImpl) proposing(height uint64, preHash []byte) *commonpb.
 		bp.log.Warnf("txbatch oversize expect <= %d, got %d", txCapacity, len(fetchBatch))
 	}
 
+	// WJY: 生成新区块
 	block, timeLasts, err := bp.generateNewBlock(
 		height,
 		preHash,
@@ -379,10 +391,14 @@ func (bp *BlockProposerImpl) proposing(height uint64, preHash []byte) *commonpb.
 		bp.log.Warnf("generate new block failed, %s", err.Error())
 		return nil
 	}
+	// WJY: 获取交易的读写集，但读写集不在这里生成
 	_, rwSetMap, _ := bp.proposalCache.GetProposedBlock(block)
 	bp.log.Debugf("proposing block \n %s", utils.FormatBlock(block))
 
+	// WJY: 生成裁剪后的区块，用于发布消息
 	cutBlock := bp.getCutBlock(block)
+	// WJY: 使用 bp.msgBus.Publish 将提议的区块发布到消息总线 msgbus.ProposedBlock，
+	// WJY: 以供共识模块使用
 	bp.msgBus.Publish(msgbus.ProposedBlock,
 		&consensuspb.ProposalBlock{Block: block, TxsRwSet: rwSetMap, CutBlock: cutBlock})
 
@@ -546,7 +562,7 @@ func (bp *BlockProposerImpl) getDuration() time.Duration {
 // getChainVersion, get chain version from config.
 // If not access from config, use default value.
 // @Deprecated
-//nolint: unused
+// nolint: unused
 func (bp *BlockProposerImpl) getChainVersion() []byte {
 	if bp.chainConf == nil || bp.chainConf.ChainConfig() == nil {
 		return []byte(DEFAULTVERSION)
