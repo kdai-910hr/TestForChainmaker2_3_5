@@ -20,8 +20,9 @@ import (
 )
 
 type SnapshotEvidence struct {
-	delegate *SnapshotImpl
-	log      protocol.Logger
+	delegate      *SnapshotImpl
+	log           protocol.Logger
+	staleReadKeys []string
 }
 
 // GetBlockFingerprint returns current block fingerprint
@@ -161,6 +162,19 @@ func (s *SnapshotEvidence) Seal() {
 		return
 	}
 	s.delegate.Seal()
+}
+
+// AddStaleReadKey 记录发生陈旧读的 key
+func (s *SnapshotEvidence) AddStaleReadKey(key string) {
+	if s.staleReadKeys == nil {
+		s.staleReadKeys = make([]string, 0)
+	}
+	s.staleReadKeys = append(s.staleReadKeys, key)
+}
+
+// GetStaleReadKeys 获取所有陈旧读的 Key
+func (s *SnapshotEvidence) GetStaleReadKeys() []string {
+	return s.staleReadKeys
 }
 
 // According to the read-write table, the read-write dependency is checked from back to front to determine whether
