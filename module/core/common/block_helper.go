@@ -539,11 +539,11 @@ func CheckBlockDigests(block *commonPb.Block, txHashes [][]byte, hashType string
 	}
 	//TODO 交易的读写依赖校验通过，DAG的校验也已经通过
 	// 因此可以将读写依赖带入算法代价模型中计算，检验ConsensusArgs中的决策是否正确
-	consensusArgs := &consensus.BlockHeaderConsensusArgs{}
-	if err := proto.Unmarshal(block.Header.ConsensusArgs, consensusArgs); err != nil {
-		return fmt.Errorf("unmarshal shedule method args from blockHeader failed,reason: %s ", err)
+	if schedule, ok := block.AdditionalData.ExtraData[scheduler.TBFTAdditionalDataSchedule]; !ok {
+		log.Debugf("ZYF fail to extract schedule method arg from additional data of block")
+		return fmt.Errorf("fail to extract schedule method arg from additional data of block")
 	} else {
-		log.Debug("ZYF Validate schedule method args from blockHeader success: ", consensusArgs.ConsensusType)
+		log.Debug("ZYF Validate schedule method args from block additional data success: ", string(schedule))
 	}
 	return nil
 }
@@ -646,7 +646,7 @@ func (vb *VerifierBlock) FetchLastBlock(block *commonPb.Block) (*commonPb.Block,
 func (vb *VerifierBlock) ValidateBlock(
 	block, lastBlock *commonPb.Block, hashType string, timeLasts map[string]int64, mode protocol.VerifyMode) (
 	map[string]*commonPb.TxRWSet, map[string][]*commonPb.ContractEvent, map[string]int64, *RwSetVerifyFailTx, error) {
-
+	vb.log.Info("ZYF Go to ValidateBlock!")
 	// verify block stamp
 	if vb.chainConf.ChainConfig().Block.BlockTimestampVerify && mode == protocol.CONSENSUS_VERIFY {
 		currentTime := utils.CurrentTimeSeconds()
@@ -769,6 +769,7 @@ func (vb *VerifierBlock) ValidateBlock(
 	}
 	// verify TxRoot
 	startRootsTick := utils.CurrentTimeMillisSeconds()
+	vb.log.Info("ZYF Go to CheckBlockDigests!")
 	err = CheckBlockDigests(block, txHashes, hashType, vb.log)
 	if err != nil {
 		return txRWSetMap, contractEventMap, timeLasts, nil, err
