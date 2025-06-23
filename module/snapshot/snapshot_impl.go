@@ -8,6 +8,7 @@ SPDX-License-Identifier: Apache-2.0
 package snapshot
 
 import (
+	"chainmaker.org/chainmaker-go/module/core/common/stalecontrol"
 	"encoding/json"
 	"fmt"
 	"sync"
@@ -71,9 +72,8 @@ type SnapshotImpl struct {
 	txRoot    []byte
 	dagHash   []byte
 	rwSetHash []byte
-	//wzy
-	//存储注入的读写集
-	AUXRwMap map[string][]sv
+
+	staleReadKeys []string // ✅ 新增字段
 }
 
 // NewQuerySnapshot create a snapshot for query tx
@@ -133,6 +133,17 @@ func (s *SnapshotImpl) SetPreSnapshot(snapshot protocol.Snapshot) {
 // GetBlockchainStore return the blockchainStore of the snapshot
 func (s *SnapshotImpl) GetBlockchainStore() protocol.BlockchainStore {
 	return s.blockchainStore
+}
+
+func (s *SnapshotImpl) GetStaleReadKeys() []string {
+	return s.staleReadKeys
+}
+func (s *SnapshotImpl) AddStaleReadKey(key string) {
+	if s.staleReadKeys == nil {
+		s.staleReadKeys = make([]string, 0)
+	}
+	s.staleReadKeys = append(s.staleReadKeys, key)
+	s.log.Warnf("✅ 成功添加 StaleReadKey：%s", key)
 }
 
 // GetLastChainConfig return the last chain config
@@ -411,8 +422,16 @@ func (s *SnapshotImpl) ApplyTxSimContext(txSimContext protocol.TxSimContext, spe
 			finalKey := constructKey(txRead.ContractName, txRead.Key)
 			// 乐观检查，便于提前发现冲突
 			if sv, ok := s.writeTable.getByLock(finalKey); ok {
+				// WJY: 对于 txRWSet.TxReads 中的每一个读操作
+				// WJY: 若存在相同键且执行序列更高的写操作，则发生冲突，返回 false
 				if sv.seq >= txExecSeq {
 					s.log.Debugf("Key Conflicted %+v-%+v, tx id:%s", sv.seq, txExecSeq, tx.Payload.TxId)
+					if stalecontrol.IsEnabled() {
+						// 在这里加日志
+						s.log.Warnf("[STALEREAD-DETECT] txid=%s detected stale-read on key=%s, sv.seq=%d, txExecSeq=%d",
+							tx.Payload.TxId, finalKey, sv.seq, txExecSeq)
+						s.AddStaleReadKey(finalKey) // 记录要回滚的 key
+					}
 					return false, len(s.txTable) + len(s.specialTxTable)
 				}
 			}
@@ -484,8 +503,17 @@ func (s *SnapshotImpl) ApplyTxSimContext(txSimContext protocol.TxSimContext, spe
 	start := time.Now()
 	for finalKey := range finalReadKvs {
 		if sv, ok := s.writeTable.getByLock(finalKey); ok {
-			//对于BatchSchedule, 只保留id小的交易 将>=修改为<
-			if enableBatch && sv.seq < txExecSeq || !enableBatch && sv.seq >= txExecSeq {
+			// WJY: 遍历 finalReadKvs 中的每个键，检查是否已被 writeTable 中的更新覆盖。
+			// WJY: 如果有冲突，则返回 false
+			if stalecontrol.IsEnabled() {
+				if sv.seq >= txExecSeq {
+					s.log.Debugf("Key Conflicted %+v-%+v, tx id:%s", sv.seq, txExecSeq, tx.Payload.TxId)
+					s.log.Warnf("⚠️ [%s] Detected Stale Read Key: %s", txSimContext.GetTx().Payload.TxId, finalKey)
+					// 记录发生 Stale Read 的 key
+					s.AddStaleReadKey(finalKey)
+					return false, s.GetSnapshotSize() + len(s.specialTxTable)
+				}
+			} else if enableBatch && sv.seq < txExecSeq || !enableBatch && sv.seq >= txExecSeq {
 				s.log.Debugf("Key Conflicted %+v-%+v, tx id:%s", sv.seq, txExecSeq, tx.Payload.TxId)
 				return false, s.GetSnapshotSize() + len(s.specialTxTable)
 			}
