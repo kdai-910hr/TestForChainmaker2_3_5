@@ -255,11 +255,15 @@ func (ts *TxScheduler) runVM2300(tx *commonPb.Transaction,
 			return result, specialTxType, err
 		}
 	}
+
+	// WJY: 调用 VmManager.RunContract 在虚拟机中执行合约，
+	// WJY: 返回合约执行结果 contractResultPayload 和执行状态码 txStatusCode
 	contractResultPayload, specialTxType, txStatusCode = ts.VmManager.RunContract(contract, method, byteCode,
 		parameters, txSimContext, gasUsed, tx.Payload.TxType)
 	if blockVersion2312 <= blockVersion {
 		ts.log.Debugf("【gas calc】%v, before `calcTxRWSetGasUsed` gasUsed = %v, err = %v",
 			tx.Payload.TxId, contractResultPayload.GasUsed, err)
+		// WJY: 计算读写集的 Gas（calcTxRWSetGasUsed
 		gasRWSet, err = calcTxRWSetGasUsed(txSimContext, txStatusCode == commonPb.TxStatusCode_SUCCESS, ts.log)
 		if err != nil {
 			ts.log.Errorf("calculate tx rw_set gas failed, err = %v", err)
