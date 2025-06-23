@@ -148,6 +148,7 @@ func (ts *TxScheduler) Schedule(block *commonPb.Block, txBatch []*commonPb.Trans
 	blockVersion := block.Header.BlockVersion
 	enableOptimizeChargeGas := coinbasemgr.IsOptimizeChargeGasEnabled(ts.chainConf)
 	//lhl enableSenderGroup := false
+	enableSenderGroup := ts.chainConf.ChainConfig().Core.EnableSenderGroup
 	enableConflictsBitWindow, conflictsBitWindow := ts.initOptimizeTools(txBatch)
 	var senderGroup *SenderGroup
 	var senderCollection *SenderCollection

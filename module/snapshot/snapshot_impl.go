@@ -142,6 +142,7 @@ func (s *SnapshotImpl) GetBlockchainStore() protocol.BlockchainStore {
 func (s *SnapshotImpl) GetStaleReadKeys() []string {
 	return s.staleReadKeys
 }
+
 func (s *SnapshotImpl) AddStaleReadKey(key string) {
 	if s.staleReadKeys == nil {
 		s.staleReadKeys = make([]string, 0)
