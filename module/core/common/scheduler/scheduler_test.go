@@ -967,139 +967,139 @@ func TestSimulateWithDag(t *testing.T) {
 	}
 }
 
-//func TestSimulateWithDagUnderGasEnabled(t *testing.T) {
+// func TestSimulateWithDagUnderGasEnabled(t *testing.T) {
 //
-//	dagNormal := &commonPb.DAG{
-//		Vertexes: []*commonPb.DAG_Neighbor{
+//		dagNormal := &commonPb.DAG{
+//			Vertexes: []*commonPb.DAG_Neighbor{
+//				{
+//					Neighbors: nil,
+//				},
+//				{
+//					Neighbors: []uint32{0},
+//				},
+//				{
+//					Neighbors: []uint32{0, 1},
+//				},
+//			},
+//		}
+//		applyTxSimContextNormal := func(txSimContext protocol.TxSimContext, specialTxType protocol.ExecOrderTxType,
+//			runVmSuccess bool, applySpecialTx bool) (bool, int) {
+//			switch txSimContext.GetTx().Payload.TxId {
+//			case txId0:
+//				return true, 1
+//			case txId1:
+//				return true, 2
+//			case txId2:
+//				return true, 3
+//			default:
+//				panic("Test shouldn't reach here")
+//			}
+//		}
+//		contractResult := &commonPb.ContractResult{
+//			Code:    0,
+//			Result:  nil,
+//			Message: "",
+//		}
+//		runContractNormal := func(*commonPb.Contract, string, []byte, map[string][]byte, protocol.TxSimContext,
+//			uint64, commonPb.TxType) (*commonPb.ContractResult, protocol.ExecOrderTxType, commonPb.TxStatusCode) {
+//			return contractResult, protocol.ExecOrderTxTypeNormal, commonPb.TxStatusCode_SUCCESS
+//		}
+//		tests := []struct {
+//			name              string
+//			dag               *commonPb.DAG
+//			applyTxSimContext func(protocol.TxSimContext, protocol.ExecOrderTxType, bool, bool) (bool, int)
+//			runContract       func(*commonPb.Contract, string, []byte, map[string][]byte, protocol.TxSimContext,
+//				uint64, commonPb.TxType) (*commonPb.ContractResult, protocol.ExecOrderTxType, commonPb.TxStatusCode)
+//			sealTimes int
+//			wantErr   bool
+//		}{
 //			{
-//				Neighbors: nil,
+//				name:              "test0",
+//				dag:               dagNormal,
+//				applyTxSimContext: applyTxSimContextNormal,
+//				runContract:       runContractNormal,
+//				sealTimes:         1,
+//				wantErr:           true, // last tx should be gas type
 //			},
 //			{
-//				Neighbors: []uint32{0},
+//				name:              "test1",
+//				dag:               dagNormal,
+//				applyTxSimContext: applyTxSimContextNormal,
+//				runContract: func(contract *commonPb.Contract, method string, byteCode []byte, parameters map[string][]byte,
+//					txContext protocol.TxSimContext, gasUsed uint64, refTxType commonPb.TxType) (
+//					*commonPb.ContractResult, protocol.ExecOrderTxType, commonPb.TxStatusCode) {
+//					txId := txContext.GetTx().GetPayload().GetTxId()
+//					if txId == txId0 {
+//						return contractResult, protocol.ExecOrderTxTypeNormal, commonPb.TxStatusCode_SUCCESS
+//					} else if txId == txId1 {
+//						return contractResult, protocol.ExecOrderTxTypeIterator, commonPb.TxStatusCode_SUCCESS
+//					} else {
+//						return contractResult, protocol.ExecOrderTxTypeChargeGas, commonPb.TxStatusCode_SUCCESS
+//					}
+//				},
+//				sealTimes: 1,
+//				wantErr:   false,
 //			},
 //			{
-//				Neighbors: []uint32{0, 1},
+//				name:              "test2",
+//				dag:               dagNormal,
+//				applyTxSimContext: applyTxSimContextNormal,
+//				runContract: func(contract *commonPb.Contract, method string, byteCode []byte, parameters map[string][]byte,
+//					txContext protocol.TxSimContext, gasUsed uint64, refTxType commonPb.TxType) (
+//					*commonPb.ContractResult, protocol.ExecOrderTxType, commonPb.TxStatusCode) {
+//					txId := txContext.GetTx().GetPayload().GetTxId()
+//					if txId == txId0 {
+//						return contractResult, protocol.ExecOrderTxTypeNormal, commonPb.TxStatusCode_SUCCESS
+//					}
+//					return contractResult, protocol.ExecOrderTxTypeIterator, commonPb.TxStatusCode_SUCCESS
+//				},
+//				sealTimes: 1,
+//				wantErr:   true, // last tx should be gas type
 //			},
-//		},
-//	}
-//	applyTxSimContextNormal := func(txSimContext protocol.TxSimContext, specialTxType protocol.ExecOrderTxType,
-//		runVmSuccess bool, applySpecialTx bool) (bool, int) {
-//		switch txSimContext.GetTx().Payload.TxId {
-//		case txId0:
-//			return true, 1
-//		case txId1:
-//			return true, 2
-//		case txId2:
-//			return true, 3
-//		default:
-//			panic("Test shouldn't reach here")
+//		}
+//		for _, tt := range tests {
+//			t.Run(tt.name, func(t *testing.T) {
+//				vmMgr, _, _, snapshot, scheduler, contractId, block := prepare4(t, true, false, false, 3, false)
+//
+//				parameters := make(map[string]string, 8)
+//				tx0 := newTx(txId0, contractId, parameters)
+//				tx1 := newTx(txId1, contractId, parameters)
+//				tx2 := newTx(txId2, contractId, parameters)
+//				tx2.Payload.ContractName = syscontract.SystemContract_ACCOUNT_MANAGER.String()
+//
+//				block.Txs = []*commonPb.Transaction{tx0, tx1, tx2}
+//				block.Dag = tt.dag
+//
+//				snapshot.EXPECT().IsSealed().AnyTimes().Return(false)
+//				snapshot.EXPECT().Seal().Return().Times(tt.sealTimes)
+//				snapshot.EXPECT().ApplyTxSimContext(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).AnyTimes().DoAndReturn(tt.applyTxSimContext)
+//				txResults := make(map[string]*commonPb.Result, len(block.Txs))
+//				snapshot.EXPECT().GetTxResultMap().AnyTimes().Return(txResults)
+//				dagCopy := &commonPb.DAG{
+//					Vertexes: []*commonPb.DAG_Neighbor{
+//						{
+//							Neighbors: []uint32{},
+//						},
+//					},
+//				}
+//				snapshot.EXPECT().BuildDAG(gomock.Any(), gomock.Any()).AnyTimes().Return(dagCopy)
+//
+//				vmMgr.EXPECT().RunContract(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).AnyTimes().DoAndReturn(tt.runContract)
+//
+//				txRwSet, result, err := scheduler.SimulateWithDag(block, snapshot)
+//				if tt.wantErr {
+//					require.NotNil(t, err)
+//					fmt.Println("err: ", err)
+//				} else {
+//					require.Nil(t, err)
+//					require.NotNil(t, txRwSet)
+//					require.NotNil(t, result)
+//					fmt.Println("txRWSet: ", txRwSet)
+//					fmt.Println("result: ", result)
+//				}
+//			})
 //		}
 //	}
-//	contractResult := &commonPb.ContractResult{
-//		Code:    0,
-//		Result:  nil,
-//		Message: "",
-//	}
-//	runContractNormal := func(*commonPb.Contract, string, []byte, map[string][]byte, protocol.TxSimContext,
-//		uint64, commonPb.TxType) (*commonPb.ContractResult, protocol.ExecOrderTxType, commonPb.TxStatusCode) {
-//		return contractResult, protocol.ExecOrderTxTypeNormal, commonPb.TxStatusCode_SUCCESS
-//	}
-//	tests := []struct {
-//		name              string
-//		dag               *commonPb.DAG
-//		applyTxSimContext func(protocol.TxSimContext, protocol.ExecOrderTxType, bool, bool) (bool, int)
-//		runContract       func(*commonPb.Contract, string, []byte, map[string][]byte, protocol.TxSimContext,
-//			uint64, commonPb.TxType) (*commonPb.ContractResult, protocol.ExecOrderTxType, commonPb.TxStatusCode)
-//		sealTimes int
-//		wantErr   bool
-//	}{
-//		{
-//			name:              "test0",
-//			dag:               dagNormal,
-//			applyTxSimContext: applyTxSimContextNormal,
-//			runContract:       runContractNormal,
-//			sealTimes:         1,
-//			wantErr:           true, // last tx should be gas type
-//		},
-//		{
-//			name:              "test1",
-//			dag:               dagNormal,
-//			applyTxSimContext: applyTxSimContextNormal,
-//			runContract: func(contract *commonPb.Contract, method string, byteCode []byte, parameters map[string][]byte,
-//				txContext protocol.TxSimContext, gasUsed uint64, refTxType commonPb.TxType) (
-//				*commonPb.ContractResult, protocol.ExecOrderTxType, commonPb.TxStatusCode) {
-//				txId := txContext.GetTx().GetPayload().GetTxId()
-//				if txId == txId0 {
-//					return contractResult, protocol.ExecOrderTxTypeNormal, commonPb.TxStatusCode_SUCCESS
-//				} else if txId == txId1 {
-//					return contractResult, protocol.ExecOrderTxTypeIterator, commonPb.TxStatusCode_SUCCESS
-//				} else {
-//					return contractResult, protocol.ExecOrderTxTypeChargeGas, commonPb.TxStatusCode_SUCCESS
-//				}
-//			},
-//			sealTimes: 1,
-//			wantErr:   false,
-//		},
-//		{
-//			name:              "test2",
-//			dag:               dagNormal,
-//			applyTxSimContext: applyTxSimContextNormal,
-//			runContract: func(contract *commonPb.Contract, method string, byteCode []byte, parameters map[string][]byte,
-//				txContext protocol.TxSimContext, gasUsed uint64, refTxType commonPb.TxType) (
-//				*commonPb.ContractResult, protocol.ExecOrderTxType, commonPb.TxStatusCode) {
-//				txId := txContext.GetTx().GetPayload().GetTxId()
-//				if txId == txId0 {
-//					return contractResult, protocol.ExecOrderTxTypeNormal, commonPb.TxStatusCode_SUCCESS
-//				}
-//				return contractResult, protocol.ExecOrderTxTypeIterator, commonPb.TxStatusCode_SUCCESS
-//			},
-//			sealTimes: 1,
-//			wantErr:   true, // last tx should be gas type
-//		},
-//	}
-//	for _, tt := range tests {
-//		t.Run(tt.name, func(t *testing.T) {
-//			vmMgr, _, _, snapshot, scheduler, contractId, block := prepare4(t, true, false, false, 3, false)
-//
-//			parameters := make(map[string]string, 8)
-//			tx0 := newTx(txId0, contractId, parameters)
-//			tx1 := newTx(txId1, contractId, parameters)
-//			tx2 := newTx(txId2, contractId, parameters)
-//			tx2.Payload.ContractName = syscontract.SystemContract_ACCOUNT_MANAGER.String()
-//
-//			block.Txs = []*commonPb.Transaction{tx0, tx1, tx2}
-//			block.Dag = tt.dag
-//
-//			snapshot.EXPECT().IsSealed().AnyTimes().Return(false)
-//			snapshot.EXPECT().Seal().Return().Times(tt.sealTimes)
-//			snapshot.EXPECT().ApplyTxSimContext(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).AnyTimes().DoAndReturn(tt.applyTxSimContext)
-//			txResults := make(map[string]*commonPb.Result, len(block.Txs))
-//			snapshot.EXPECT().GetTxResultMap().AnyTimes().Return(txResults)
-//			dagCopy := &commonPb.DAG{
-//				Vertexes: []*commonPb.DAG_Neighbor{
-//					{
-//						Neighbors: []uint32{},
-//					},
-//				},
-//			}
-//			snapshot.EXPECT().BuildDAG(gomock.Any(), gomock.Any()).AnyTimes().Return(dagCopy)
-//
-//			vmMgr.EXPECT().RunContract(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).AnyTimes().DoAndReturn(tt.runContract)
-//
-//			txRwSet, result, err := scheduler.SimulateWithDag(block, snapshot)
-//			if tt.wantErr {
-//				require.NotNil(t, err)
-//				fmt.Println("err: ", err)
-//			} else {
-//				require.Nil(t, err)
-//				require.NotNil(t, txRwSet)
-//				require.NotNil(t, result)
-//				fmt.Println("txRWSet: ", txRwSet)
-//				fmt.Println("result: ", result)
-//			}
-//		})
-//	}
-//}
 func TestMarshalDag(t *testing.T) {
 	dag := &commonPb.DAG{
 		Vertexes: []*commonPb.DAG_Neighbor{
@@ -3376,4 +3376,88 @@ func Test_CertHash(t *testing.T) {
 
 	hexHash := hex.EncodeToString(hash)
 	fmt.Printf("hex cert hash = %v \n\n", hexHash)
+}
+
+func TestPartDAG(t *testing.T) {
+	// Initialize the TxScheduler with mock dependencies
+	ts := &TxScheduler{}
+	txcount := uint32(16)
+	// Create a mock block with transactions
+	block := &commonPb.Block{
+		Header: &commonPb.BlockHeader{
+			TxCount: txcount,
+		},
+		Txs: make([]*commonPb.Transaction, txcount),
+		Dag: &commonPb.DAG{
+			Vertexes: make([]*commonPb.DAG_Neighbor, txcount),
+		},
+	}
+
+	for i := 0; i < int(txcount); i++ {
+		block.Txs[i] = &commonPb.Transaction{
+			Payload: &commonPb.Payload{
+				TxId: fmt.Sprintf("tx%d", i),
+			},
+		}
+
+		if i == 0 {
+			block.Dag.Vertexes[i] = &commonPb.DAG_Neighbor{
+				Neighbors: []uint32{},
+			}
+		} else {
+			block.Dag.Vertexes[i] = &commonPb.DAG_Neighbor{
+				Neighbors: []uint32{uint32(i - 1)},
+			}
+		}
+	}
+
+	// Create mock transaction execution times
+	ts.txTimeCostChan = make(chan txIdwithTime, txcount)
+	for i := 0; i < int(txcount); i++ {
+		ts.txTimeCostChan <- txIdwithTime{txId: fmt.Sprintf("tx%d", i), costTime: 100}
+	}
+
+	close(ts.txTimeCostChan)
+
+	// Create mock read/write sets
+	rwSetMap := make(map[string]*commonPb.TxRWSet)
+	for i := 0; i < int(txcount); i++ {
+		txID := fmt.Sprintf("tx%d", i)
+		rwSetMap[txID] = &commonPb.TxRWSet{
+			TxId: txID,
+			TxReads: []*commonPb.TxRead{
+				{
+					ContractName: "contract1",
+					Key:          []byte("key1"),
+					Value:        []byte(fmt.Sprintf("value%d", i)),
+				},
+			},
+			TxWrites: []*commonPb.TxWrite{
+				{
+					ContractName: "contract1",
+					Key:          []byte("key1"),
+					Value:        []byte(fmt.Sprintf("value%d", i+1)),
+				},
+			},
+		}
+	}
+
+	// Call the partDAG method
+	ts.partDAG(block, rwSetMap)
+
+	// Verify the results
+	// Check if the DAG has been modified correctly
+	if len(block.Dag.Vertexes) != 4 {
+		t.Errorf("Expected 4 vertices in DAG, got %d", len(block.Dag.Vertexes))
+	}
+
+	// Check if the cut edges have been processed correctly
+	// print the new dag
+	fmt.Println("%+v", block.Dag)
+
+	// Check if the partial read/write sets have been created correctly
+	if len(rwSetMap) == 0 {
+		t.Error("Expected partial read/write sets to be created, got none")
+	}
+
 }
