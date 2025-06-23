@@ -24,6 +24,7 @@ import (
 	"chainmaker.org/chainmaker/utils/v2"
 )
 
+// TODO 这里先使用全局变量，后续可以改为配置
 var enableBatch bool = true
 
 // The record value is written by the SEQ corresponding to TX
