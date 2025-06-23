@@ -8,10 +8,14 @@ SPDX-License-Identifier: Apache-2.0
 package scheduler
 
 import (
+	"bytes"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
+	"runtime"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
@@ -70,6 +74,14 @@ type TxScheduler struct {
 	ledgerCache     protocol.LedgerCache
 	contractCache   *sync.Map
 	ac              protocol.AccessControlProvider
+	//wzy
+	txTimeCostChan chan txIdwithTime
+}
+
+// wzy
+type txIdwithTime struct {
+	txId     string
+	costTime uint64
 }
 
 // Transaction dependency in adjacency table representation
@@ -112,7 +124,10 @@ func (ts *TxScheduler) Schedule(block *commonPb.Block, txBatch []*commonPb.Trans
 
 	var goRoutinePool *ants.Pool
 	poolCapacity := ts.StoreHelper.GetPoolCapacity()
-	ts.log.Debugf("GetPoolCapacity() => %v", poolCapacity)
+	// poolCapacity := ts.StoreHelper.GetPoolCapacity()
+	//原来的默认值为cpu数量4倍，单机4节点情况下一个节点平均最多获得1/4数量的线程
+	poolCapacity = poolCapacity / 16
+	ts.log.Infof("GetPoolCapacity() => %v", poolCapacity)
 	if goRoutinePool, err = ants.NewPool(poolCapacity, ants.WithPreAlloc(false)); err != nil {
 		return nil, nil, err
 	}
@@ -138,6 +153,14 @@ func (ts *TxScheduler) Schedule(block *commonPb.Block, txBatch []*commonPb.Trans
 		ts.log.Debugf("before prepare `SenderGroup` ")
 		senderGroup = NewSenderGroup(txBatch, snapshot, ts.ac)
 		ts.log.Debugf("end prepare `SenderGroup` ")
+	}
+	//wzy
+	//切分起点
+	enableDAGpartial := true //ts.chainConf.ChainConfig().Core.EnableDAGpartial
+	if enableDAGpartial {
+		ts.txTimeCostChan = make(chan txIdwithTime, txBatchSize)
+	} else {
+		ts.txTimeCostChan = nil
 	}
 
 	blockFingerPrint := string(utils.CalcBlockFingerPrintWithoutTx(block))
@@ -181,6 +204,11 @@ func (ts *TxScheduler) Schedule(block *commonPb.Block, txBatch []*commonPb.Trans
 		// Wait for schedule finish signal
 		<-ts.scheduleFinishC
 	}
+	// wzy
+	if ts.txTimeCostChan != nil {
+		close(ts.txTimeCostChan)
+	}
+
 	// Build DAG from read-write table
 	snapshot.Seal()
 	timeCostA := time.Since(startTime)
@@ -204,7 +232,14 @@ func (ts *TxScheduler) Schedule(block *commonPb.Block, txBatch []*commonPb.Trans
 
 	txRWSetMap := ts.getTxRWSetTable(snapshot, block)
 	contractEventMap := ts.getContractEventMap(block)
-
+	//wzy
+	//判断是否需要分割dag
+	if enableDAGpartial {
+		AUXRwMap := ts.partDAG(block, txRWSetMap)
+		AUXRwMapBytes, _ := json.Marshal(AUXRwMap)
+		block.AdditionalData.ExtraData["AUXRwMap"] = AUXRwMapBytes
+	}
+	ts.log.Debugf("afterpart dag : %+v", block.Dag)
 	return txRWSetMap, contractEventMap, nil
 }
 
@@ -310,7 +345,10 @@ func handleTx(block *commonPb.Block, snapshot protocol.Snapshot,
 		return
 	}
 	var start time.Time
-	if localconf.ChainMakerConfig.MonitorConfig.Enabled {
+	//wzy
+
+	enableDAGpartial := false //ts.chainConf.ChainConfig().Core.EnableDAGpartial
+	if localconf.ChainMakerConfig.MonitorConfig.Enabled || enableDAGpartial {
 		start = time.Now()
 	}
 
@@ -318,6 +356,7 @@ func handleTx(block *commonPb.Block, snapshot protocol.Snapshot,
 	// 1) the read/write set
 	// 2) the result that telling if the invoke success.
 	txSimContext, specialTxType, runVmSuccess := ts.executeTx(tx, snapshot, block, senderCollection)
+	costTime := time.Since(start)
 	tx.Result = txSimContext.GetTxResult()
 	ts.log.DebugDynamic(func() string {
 		return fmt.Sprintf("handleTx(`%v`) => executeTx(...) => runVmSuccess = %v", tx.GetPayload().TxId, runVmSuccess)
@@ -336,6 +375,7 @@ func handleTx(block *commonPb.Block, snapshot protocol.Snapshot,
 		if enableConflictsBitWindow {
 			ts.adjustPoolSize(goRoutinePool, conflictsBitWindow, ConflictTx)
 		}
+		//wzy 提交失败，在此处对失败的交易进行读写集分析，经过重新排序后再加入runningTxC而非原始顺序加入
 
 		runningTxC <- tx
 
@@ -348,6 +388,14 @@ func handleTx(block *commonPb.Block, snapshot protocol.Snapshot,
 		ts.handleApplyResult(enableConflictsBitWindow, enableSenderGroup,
 			conflictsBitWindow, senderGroup, goRoutinePool, tx, start)
 
+		//wzy 向通道发送txid和时间cost
+		if ts.txTimeCostChan != nil {
+			ts.txTimeCostChan <- txIdwithTime{
+				txId:     tx.Payload.GetTxId(),
+				costTime: uint64(costTime),
+			}
+		}
+
 		ts.log.DebugDynamic(func() string {
 			return fmt.Sprintf("apply to snapshot success, tx id:%s, result:%+v, apply count:%d",
 				tx.Payload.GetTxId(), txSimContext.GetTxResult(), applySize)
@@ -357,6 +405,12 @@ func handleTx(block *commonPb.Block, snapshot protocol.Snapshot,
 	if applySize >= txBatchSize {
 		finishC <- true
 	}
+}
+
+// wzy处理失败交易进行重排序加入队列
+func (ts *TxScheduler) handleFailtxWithRwset(runningTxC chan *commonPb.Transaction,
+	txwithRwSet *commonPb.TransactionWithRWSet) {
+
 }
 
 func (ts *TxScheduler) initOptimizeTools(
@@ -531,7 +585,7 @@ func (ts *TxScheduler) SimulateWithDag(block *commonPb.Block, snapshot protocol.
 			select {
 			case txIndex := <-runningTxC:
 				tx := txMapping[txIndex]
-				ts.log.Debugf("simulate with dag, prepare to submit running task for tx id:%s",
+				ts.log.Debugf("simulate with dag, prepare to submit running task for tx[%+v] id:%s", txIndex,
 					tx.Payload.GetTxId())
 				err = goRoutinePool.Submit(func() {
 					handleTxInSimulateWithDag(
@@ -599,6 +653,7 @@ func (ts *TxScheduler) initSimulateDag(dag *commonPb.DAG) (
 	dagRemain := make(map[int]dagNeighbors, len(dag.Vertexes))
 	reverseDagRemain := make(map[int]dagNeighbors, len(dag.Vertexes)*4)
 	var txIndexBatch []int
+	dagSize := uint32(len(dag.Vertexes)) + 1
 	for txIndex, neighbors := range dag.Vertexes {
 		if neighbors == nil {
 			return nil, nil, nil, fmt.Errorf("dag has nil neighbor")
@@ -608,9 +663,17 @@ func (ts *TxScheduler) initSimulateDag(dag *commonPb.DAG) (
 			continue
 		}
 		dn := make(dagNeighbors)
+		cutNeighborCnt := 0
+		lastNeighbor := dagSize
 		for index, neighbor := range neighbors.Neighbors {
+			//wzy 跳过被标记为切割的依赖
+			if neighbor == dagSize {
+				cutNeighborCnt++
+				continue
+			}
 			if index > 0 {
-				if neighbors.Neighbors[index-1] >= neighbor {
+				//if neighbors.Neighbors[lastNeighborIndex] >= neighbor {
+				if lastNeighbor != dagSize && lastNeighbor >= neighbor {
 					return nil, nil, nil, fmt.Errorf("dag neighbors not strict increasing, neighbors: %v", neighbors.Neighbors)
 				}
 			}
@@ -622,6 +685,11 @@ func (ts *TxScheduler) initSimulateDag(dag *commonPb.DAG) (
 				reverseDagRemain[int(neighbor)] = make(dagNeighbors)
 			}
 			reverseDagRemain[int(neighbor)][txIndex] = struct{}{}
+			lastNeighbor = neighbor
+		}
+		if len(neighbors.Neighbors) == cutNeighborCnt {
+			txIndexBatch = append(txIndexBatch, txIndex)
+			continue
 		}
 		dagRemain[txIndex] = dn
 	}
@@ -633,7 +701,14 @@ func handleTxInSimulateWithDag(
 	ts *TxScheduler, tx *commonPb.Transaction, txIndex int,
 	doneTxC chan *applyResult, txBatchSize int,
 	collection *SenderCollection) {
-	txSimContext, specialTxType, runVmSuccess := ts.executeTx(tx, snapshot, block, collection)
+	//zyf 这里如果没有AUXRWMap, executeTxWithIndex会回退到executeTx
+	t := txIndex
+	if _, ok := block.AdditionalData.ExtraData["AUXRwMap"]; !ok {
+		t = -1
+	}
+	txSimContext, specialTxType, runVmSuccess := ts.executeTxWithIndex(tx, snapshot, block, collection, t)
+
+	//txSimContext, specialTxType, runVmSuccess := ts.executeTx(tx, snapshot, block, collection)
 
 	// if apply failed means this tx's read set conflict with other txs' write set
 	isApplySuccess, applySize := snapshot.ApplyTxSimContext(txSimContext, specialTxType, runVmSuccess, true)
@@ -663,6 +738,102 @@ func (ts *TxScheduler) executeTx(
 	tx *commonPb.Transaction, snapshot protocol.Snapshot, block *commonPb.Block, collection *SenderCollection) (
 	protocol.TxSimContext, protocol.ExecOrderTxType, bool) {
 	txSimContext := vm.NewTxSimContext(ts.VmManager, snapshot, tx, block.Header.BlockVersion, ts.log)
+	ts.log.DebugDynamic(func() string {
+		return fmt.Sprintf("NewTxSimContext finished for tx id:%s", tx.Payload.GetTxId())
+	})
+	//ts.log.DebugDynamic(func() string {
+	//	return fmt.Sprintf("tx.Result = %v", tx.Result)
+	//})
+
+	enableGas := ts.checkGasEnable()
+	enableOptimizeChargeGas := coinbasemgr.IsOptimizeChargeGasEnabled(ts.chainConf)
+	blockVersion := block.GetHeader().BlockVersion
+
+	txNeedChargeGas := ts.checkNativeFilter(
+		txSimContext.GetBlockVersion(),
+		tx.Payload.ContractName,
+		tx.Payload.Method,
+		tx,
+		txSimContext.GetSnapshot())
+
+	var (
+		runVmSuccess  = true
+		txResult      *commonPb.Result
+		specialTxType protocol.ExecOrderTxType
+		err           error
+		accountStatus commonPb.TxStatusCode
+		abnormal      bool
+	)
+
+	if blockVersion >= blockVersion2340 {
+		accountStatus, abnormal = ts.processSenderCollectionIn234(tx,
+			txNeedChargeGas, enableOptimizeChargeGas, collection, txSimContext)
+		if abnormal {
+			return txSimContext, protocol.ExecOrderTxTypeNormal, false
+		}
+	}
+	if blockVersion >= 2300 {
+		if txNeedChargeGas && !ts.guardForExecuteTx2300(tx, txSimContext, enableGas, enableOptimizeChargeGas,
+			snapshot, accountStatus, blockVersion) {
+			return txSimContext, protocol.ExecOrderTxTypeNormal, false
+		}
+	} else if blockVersion >= 2220 {
+		if !ts.guardForExecuteTx2220(tx, txSimContext, enableGas, enableOptimizeChargeGas) {
+			return txSimContext, protocol.ExecOrderTxTypeNormal, false
+		}
+	}
+
+	ts.log.Debugf("run vm start for tx:%s", tx.Payload.GetTxId())
+	if blockVersion >= 2300 {
+		if txResult, specialTxType, err = ts.runVM2300(tx, txSimContext, enableOptimizeChargeGas); err != nil {
+			runVmSuccess = false
+			ts.log.Errorf("failed to run vm for tx id:%s,contractName:%s, tx result:%+v, error:%+v",
+				tx.Payload.GetTxId(), tx.Payload.ContractName, txResult, err)
+		}
+	} else if blockVersion >= 2220 {
+		if txResult, specialTxType, err = ts.runVM2220(tx, txSimContext, enableOptimizeChargeGas); err != nil {
+			runVmSuccess = false
+			ts.log.Errorf("failed to run vm for tx id:%s,contractName:%s, tx result:%+v, error:%+v",
+				tx.Payload.GetTxId(), tx.Payload.ContractName, txResult, err)
+		}
+	} else {
+		if txResult, specialTxType, err = ts.runVM2210(tx, txSimContext); err != nil {
+			runVmSuccess = false
+			ts.log.Errorf("failed to run vm for tx id:%s,contractName:%s, tx result:%+v, error:%+v",
+				tx.Payload.GetTxId(), tx.Payload.ContractName, txResult, err)
+		}
+	}
+	if blockVersion >= blockVersion2340 && enableOptimizeChargeGas {
+		txNeedChargingGas := txNeedChargeGas && tx.Payload.TxType == commonPb.TxType_INVOKE_CONTRACT
+		ts.log.Debugf("txNeedChargingGas = %v", txNeedChargingGas)
+		if gasCharged, err2 := collection.chargeGasInSenderCollection(tx, txResult, txNeedChargingGas); err2 != nil {
+			runVmSuccess = false
+			txResult = &commonPb.Result{
+				Code:    commonPb.TxStatusCode_CONTRACT_FAIL,
+				Message: err2.Error(),
+				ContractResult: &commonPb.ContractResult{
+					Code:    1,
+					GasUsed: gasCharged,
+					Message: err2.Error(),
+				},
+			}
+		}
+	}
+	ts.log.Debugf("run vm finished for tx:%s, runVmSuccess:%v, txResult = %v ", tx.Payload.TxId, runVmSuccess, txResult)
+	txSimContext.SetTxResult(txResult)
+	return txSimContext, specialTxType, runVmSuccess
+}
+
+func (ts *TxScheduler) executeTxWithIndex(
+	tx *commonPb.Transaction, snapshot protocol.Snapshot, block *commonPb.Block, collection *SenderCollection, index int) (
+	protocol.TxSimContext, protocol.ExecOrderTxType, bool) {
+	if index == -1 {
+		return ts.executeTx(tx, snapshot, block, collection)
+	}
+	//设置交易的序号
+	txSimContext := vm.NewTxSimContext(ts.VmManager, snapshot, tx, block.Header.BlockVersion, ts.log)
+	txSimContext.SetTxExecSeq(index)
+
 	ts.log.DebugDynamic(func() string {
 		return fmt.Sprintf("NewTxSimContext finished for tx id:%s", tx.Payload.GetTxId())
 	})
@@ -1866,4 +2037,221 @@ func appendSpecialTxsToDag(dag *commonPb.DAG, txExecOrderSpecialCount uint32) {
 		dagNeighbors.Neighbors = append(dagNeighbors.Neighbors, txExecOrderNormalCount+i-1)
 		dag.Vertexes = append(dag.Vertexes, dagNeighbors)
 	}
+}
+
+type Edge struct {
+	From, To uint32
+	Weight   int
+}
+type Sv struct {
+	Seq   int    `json:"Seq"`
+	Value []byte `json:"Value"`
+}
+
+type sv struct {
+	seq   int
+	value []byte
+}
+
+type EdgeSet []Edge
+
+func (edges EdgeSet) Len() int           { return len(edges) }
+func (edges EdgeSet) Less(i, j int) bool { return edges[i].Weight > edges[j].Weight }
+func (edges EdgeSet) Swap(i, j int)      { edges[i], edges[j] = edges[j], edges[i] }
+
+/*
+1通过交易执行时间计算节点权重 or 用gas表示交易权重？
+2计算该交易的来自别的节点的写集的读集大小
+3选择分割的边，即最终需要携带的读写集
+*/
+func (ts *TxScheduler) partDAG(block *commonPb.Block, rwSetMap map[string]*commonPb.TxRWSet) map[string][]Sv {
+	txCount := uint32(len(rwSetMap))
+	if len(ts.txTimeCostChan) < len(rwSetMap) {
+		ts.log.Warnf("no enough timeCost data in channel only %+v but need %+v", len(ts.txTimeCostChan), len(rwSetMap))
+		return nil
+	}
+	var dagCount = runtime.NumCPU() * 4
+	if txCount <= uint32(dagCount) {
+		return nil
+	}
+
+	//rwsetMap使用txid为string类型的txid作为key
+	//block内tx为txid为uint32类型的索引，也是dag使用的索引
+
+	//计算节点权重
+	txWeightMap := make(map[string]uint64, txCount)
+	var totalWeight uint64 = 0
+	for txIdWithTimeCost := range ts.txTimeCostChan {
+		txWeightMap[txIdWithTimeCost.txId] = txIdWithTimeCost.costTime
+		totalWeight += txIdWithTimeCost.costTime
+	}
+	ts.log.Info("total Weight is : %+v", totalWeight)
+
+	var txWeightThreshold = totalWeight / uint64(dagCount)
+	ts.log.Info("txWeightThreshold is : %+v", txWeightThreshold)
+	//索引转换
+	txWeight := make([]uint64, txCount)
+	for i, tx := range block.Txs {
+		txWeight[i] = txWeightMap[tx.Payload.TxId]
+		//ts.log.Infof("tx [%+v] weight is ", i, txWeight[i])
+	}
+
+	var edgeSet EdgeSet
+	for i := uint32(0); i < txCount; i++ {
+		for _, j := range block.Dag.Vertexes[i].Neighbors {
+			//根据节点传递的读写集大小计算边权重
+			var EdgeWeight = 0
+			wSet := rwSetMap[block.Txs[j].Payload.TxId].TxWrites
+			rSet := rwSetMap[block.Txs[i].Payload.TxId].TxReads
+			// tx的读写集以key升序排序,使用双指针方法遍历两个有序集合
+			w, r := 0, 0
+			for w < len(wSet) && r < len(rSet) {
+				if bytes.Compare(wSet[w].Key, rSet[r].Key) < 0 {
+					w++
+				} else if bytes.Compare(wSet[w].Key, rSet[r].Key) > 0 {
+					r++
+				} else {
+					// 找到匹配的key，增加EdgeWeight
+					EdgeWeight += len(rSet[r].Key) + len(rSet[r].Value) + len(rSet[r].ContractName)
+					w++
+					r++
+				}
+			}
+			edgeSet = append(edgeSet, Edge{uint32(j), uint32(i), EdgeWeight})
+		}
+	}
+	sort.Sort(edgeSet)
+	curSubDAGWeight := uint64(0)
+	isVisit := make([]bool, txCount)             //节点是否加入子图
+	txSubDAGMap := make(map[uint32]int, txCount) //txid与子图映射关系
+	curSubDAG := make([]uint32, 0)               //当前子图
+	subDAGSet := make([][]uint32, 0)
+	cutEdgeSet := make([]Edge, 0)
+	//ts.log.Info("after sort edgeSet is : %+v", edgeSet)
+	//单独保存cutEdge方便后续计算携带读写集
+	for _, edge := range edgeSet {
+		u := edge.From
+		v := edge.To
+		//对于每个子图尝试加入子图，判断加入后子图的权重变化是否超过阙值
+		//判断uv是否为割边：当uv无法加入已有的图且子图数量超过上限无法创建新图
+		ts.log.Debugf("deal with %+v and %+v ", u, v)
+		if !isVisit[u] && !isVisit[v] { //处理两个交易均未加入的情况
+			ts.log.Debugf("case 1 deal with %+v and %+v", u, v)
+			if curSubDAGWeight+txWeight[u]+txWeight[v] <= txWeightThreshold {
+				//uv加入当前图
+				curSubDAG = append(curSubDAG, u)
+				curSubDAG = append(curSubDAG, v)
+				isVisit[u] = true
+				isVisit[v] = true
+				txSubDAGMap[u] = len(subDAGSet)
+				txSubDAGMap[v] = len(subDAGSet)
+				curSubDAGWeight += txWeight[u] + txWeight[v]
+			} else if len(subDAGSet) < dagCount {
+				//处理上一个子图
+				subDAGSet = append(subDAGSet, curSubDAG)
+				//uv加入新子图
+				curSubDAG = []uint32{u, v}
+				isVisit[u] = true
+				isVisit[v] = true
+				txSubDAGMap[u] = len(subDAGSet)
+				txSubDAGMap[v] = len(subDAGSet)
+				curSubDAGWeight = txWeight[u] + txWeight[v]
+			} else {
+				//从dag中删除该边
+				cutEdgeSet = append(cutEdgeSet, edge)
+			}
+		} else if !isVisit[u] && isVisit[v] { //处理u未加入子图，v已经加入
+			ts.log.Debugf("case 2 deal with %+v and %+v", u, v)
+			ts.log.Debugf("v is in dag %+v and curdag is %+v", txSubDAGMap[v], len(subDAGSet))
+			if txSubDAGMap[v] == len(subDAGSet) && curSubDAGWeight+txWeight[u] <= txWeightThreshold {
+				curSubDAG = append(curSubDAG, u)
+				isVisit[u] = true
+				txSubDAGMap[u] = len(subDAGSet)
+				curSubDAGWeight += txWeight[u]
+			} else {
+				cutEdgeSet = append(cutEdgeSet, edge)
+			}
+		} else if isVisit[u] && !isVisit[v] { //处理u加入子图，v未加入
+			ts.log.Debugf("case 3 deal with %+v and %+v", u, v)
+			ts.log.Debugf("u is in dag %+v and curdag is %+v", txSubDAGMap[u], len(subDAGSet))
+			if txSubDAGMap[u] == len(subDAGSet) && curSubDAGWeight+txWeight[v] <= txWeightThreshold { //u在当前子图中，
+				curSubDAG = append(curSubDAG, v)
+				isVisit[v] = true
+				txSubDAGMap[v] = len(subDAGSet)
+				curSubDAGWeight += txWeight[v]
+
+			} else {
+				cutEdgeSet = append(cutEdgeSet, edge)
+			}
+		} else {
+			//均加入了子图中
+			ts.log.Debugf("case 4 deal with %+v and %+v", u, v)
+			if txSubDAGMap[v] != txSubDAGMap[u] { //加入不同子图
+				cutEdgeSet = append(cutEdgeSet, edge)
+			}
+			//在同一子图则无需处理
+		}
+
+	}
+	ts.log.Info("subDag set is : %+v", subDAGSet)
+	ts.log.Debugf("cutEdgeSet is : %+v", cutEdgeSet)
+	//处理未加入的tx
+	for index := range isVisit {
+		if !isVisit[index] {
+			if curSubDAGWeight+txWeight[index] > txWeightThreshold {
+				curSubDAG = append(curSubDAG, uint32(index))
+				curSubDAGWeight += txWeight[index]
+			} else {
+				subDAGSet = append(subDAGSet, curSubDAG)
+				curSubDAG = []uint32{uint32(index)}
+				curSubDAGWeight = txWeight[index]
+			}
+		}
+	}
+	ts.log.Info("subDag set is: %+v", subDAGSet)
+	ts.log.Debugf("cutEdgeSet is : %+v", cutEdgeSet)
+	//new：使用切片存储然后序列化，在反序列化时直接放入AUXdata
+	AUXRwMap := make(map[string][]Sv)
+	for _, edge := range cutEdgeSet {
+		txId := block.Txs[edge.From].Payload.TxId
+		wSeq := int(edge.From) //写该key的tx的seq，后续验证执行时根据该seq选择具体读该key的哪个版本
+		wSet := rwSetMap[txId].TxWrites
+		rSet := rwSetMap[txId].TxReads
+		//假设写集比读集更短
+		wHashset := make(map[string]struct{}, len(rSet))
+		for _, r := range rSet {
+			wHashset[string(r.Key)] = struct{}{}
+		}
+		for _, w := range wSet {
+			if _, ok := wHashset[string(w.Key)]; ok {
+				AUXRwMap[w.ContractName+string(w.Key)] = append(AUXRwMap[w.ContractName+string(w.Key)], Sv{Seq: wSeq, Value: w.Value})
+			}
+		}
+		wHashset = nil
+
+	}
+	for key, slice := range AUXRwMap {
+		sort.Slice(slice, func(i, j int) bool {
+			return slice[i].Seq < slice[j].Seq
+		})
+		AUXRwMap[key] = slice
+	}
+	ts.log.Debugf("AUXRwMap is : %+v", AUXRwMap)
+	//修改根据割边集合修改dag
+	for _, edge := range cutEdgeSet {
+		//数组删除代价大，就用修改依赖值为txCount+1表示删除，后续simulate时也是先转换成map再模拟拓扑排序执行，在转换map时过滤掉依赖于自己的边即可
+		for i, from := range block.Dag.Vertexes[edge.To].Neighbors {
+			if from == edge.From {
+				block.Dag.Vertexes[edge.To].Neighbors[i] = uint32(txCount) + 1
+				break
+			}
+		}
+	}
+	// //整理割边集合
+	// cutEdgeMap := make(map[uint32][]uint32)
+	// for _, edge := range cutEdgeSet {
+	// 	cutEdgeMap[edge.From] = append(cutEdgeMap[edge.From], edge.To)
+	// }
+	return AUXRwMap
+
 }
