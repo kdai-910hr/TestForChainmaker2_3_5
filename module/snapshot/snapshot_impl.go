@@ -8,6 +8,7 @@ SPDX-License-Identifier: Apache-2.0
 package snapshot
 
 import (
+	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
@@ -70,6 +71,9 @@ type SnapshotImpl struct {
 	txRoot    []byte
 	dagHash   []byte
 	rwSetHash []byte
+	//wzy
+	//存储注入的读写集
+	AUXRwMap map[string][]sv
 }
 
 // NewQuerySnapshot create a snapshot for query tx
@@ -206,6 +210,22 @@ func (s *SnapshotImpl) GetKey(txExecSeq int, contractName string, key []byte) ([
 	//	txExecSeq = snapshotSize //nolint: ineffassign, staticcheck
 	//}
 	finalKey := constructKey(contractName, key)
+	//wzy
+	//从AUXRwMap中读，由于根据dag执行，所依赖的交易一定已经执行
+	if s.AUXRwMap != nil && txExecSeq != -1 {
+		if AUXRwSlice, ok := s.AUXRwMap[finalKey]; ok {
+			//遍历该key的所有写版本，找到小于txExecSeq的最新版本
+			result := -1
+			for i, sv := range AUXRwSlice {
+				if sv.seq < txExecSeq && sv.seq > result {
+					result = i
+				}
+			}
+			if result != -1 {
+				return AUXRwSlice[result].value, nil
+			}
+		}
+	}
 	if sv, ok := s.writeTable.getByLock(finalKey); ok {
 		return sv.value, nil
 	}
@@ -229,8 +249,10 @@ func (s *SnapshotImpl) GetKeys(txExecSeq int, keys []*vmPb.BatchKey) ([]*vmPb.Ba
 	var (
 		done              bool
 		err               error
+		AUXRwValues       []*vmPb.BatchKey
 		writeSetValues    []*vmPb.BatchKey
 		readSetValues     []*vmPb.BatchKey
+		emptyAUXRwKeys    []*vmPb.BatchKey
 		emptyWriteSetKeys []*vmPb.BatchKey
 		emptyReadSetKeys  []*vmPb.BatchKey
 		value             []*vmPb.BatchKey
@@ -243,9 +265,19 @@ func (s *SnapshotImpl) GetKeys(txExecSeq int, keys []*vmPb.BatchKey) ([]*vmPb.Ba
 	//if txExecSeq > snapshotSize || txExecSeq < 0 {
 	//	txExecSeq = snapshotSize //nolint: ineffassign, staticcheck
 	//}
-
-	if writeSetValues, emptyWriteSetKeys, done = s.getBatchFromWriteSet(keys); done {
-		return writeSetValues, nil
+	//wzy
+	enableDAG := s.AUXRwMap != nil
+	if enableDAG {
+		if AUXRwValues, emptyAUXRwKeys, done = s.getBatchFromAUXRwMap(keys, txExecSeq); done {
+			return writeSetValues, nil
+		}
+		if writeSetValues, emptyWriteSetKeys, done = s.getBatchFromWriteSet(emptyAUXRwKeys); done {
+			return writeSetValues, nil
+		}
+	} else {
+		if writeSetValues, emptyWriteSetKeys, done = s.getBatchFromWriteSet(keys); done {
+			return writeSetValues, nil
+		}
 	}
 
 	if readSetValues, emptyReadSetKeys, done = s.getBatchFromReadSet(emptyWriteSetKeys); done {
@@ -264,7 +296,12 @@ func (s *SnapshotImpl) GetKeys(txExecSeq int, keys []*vmPb.BatchKey) ([]*vmPb.Ba
 	if err != nil {
 		return nil, err
 	}
-	return append(objects, append(value, append(readSetValues, writeSetValues...)...)...), nil
+	if enableDAG {
+		return append(objects, append(value, append(readSetValues, append(writeSetValues, AUXRwValues...)...)...)...), nil
+	} else {
+		return append(objects, append(value, append(readSetValues, writeSetValues...)...)...), nil
+	}
+
 }
 
 // getObjects returns objects on given keys
@@ -341,6 +378,10 @@ func (s *SnapshotImpl) getBatchFromReadSet(keys []*vmPb.BatchKey) ([]*vmPb.Batch
 // ApplyTxSimContext add TxSimContext to the snapshot, return current applied tx num whether success of not
 func (s *SnapshotImpl) ApplyTxSimContext(txSimContext protocol.TxSimContext, specialTxType protocol.ExecOrderTxType,
 	runVmSuccess bool, applySpecialTx bool) (bool, int) {
+	//wzy
+	if s.AUXRwMap != nil && len(s.AUXRwMap) != 0 {
+		return s.applyTxSimContextWithOrder(txSimContext, specialTxType, runVmSuccess, applySpecialTx)
+	}
 
 	tx := txSimContext.GetTx()
 	s.log.DebugDynamic(func() string {
@@ -408,6 +449,7 @@ func (s *SnapshotImpl) ApplyTxSimContext(txSimContext protocol.TxSimContext, spe
 		//没有冲突才可以生效结果
 		//放到所有检查的最后面，对应install函数
 	}
+	// Append to write table
 	for _, txWrite := range txRWSet.TxWrites {
 		finalKey := constructKey(txWrite.ContractName, txWrite.Key)
 		if enableBatch {
@@ -442,7 +484,7 @@ func (s *SnapshotImpl) ApplyTxSimContext(txSimContext protocol.TxSimContext, spe
 	start := time.Now()
 	for finalKey := range finalReadKvs {
 		if sv, ok := s.writeTable.getByLock(finalKey); ok {
-			//只保留id小的交易 将>=修改为<
+			//对于BatchSchedule, 只保留id小的交易 将>=修改为<
 			if enableBatch && sv.seq < txExecSeq || !enableBatch && sv.seq >= txExecSeq {
 				s.log.Debugf("Key Conflicted %+v-%+v, tx id:%s", sv.seq, txExecSeq, tx.Payload.TxId)
 				return false, s.GetSnapshotSize() + len(s.specialTxTable)
@@ -452,6 +494,106 @@ func (s *SnapshotImpl) ApplyTxSimContext(txSimContext protocol.TxSimContext, spe
 	micro := time.Since(start).Microseconds()
 	s.applyConflictTime.Add(micro)
 	s.applyOptimize(tx, txRWSet, txResult, runVmSuccess, finalReadKvs, finalWriteKvs)
+	return true, s.GetSnapshotSize()
+}
+
+// wzy
+func (s *SnapshotImpl) applyTxSimContextWithOrder(txSimContext protocol.TxSimContext, specialTxType protocol.ExecOrderTxType,
+	runVmSuccess bool, applySpecialTx bool) (bool, int) {
+
+	tx := txSimContext.GetTx()
+	s.log.DebugDynamic(func() string {
+		return fmt.Sprintf("apply tx: %s, execOrderTxType:%d, runVmSuccess:%v, applySpecialTx:%v", tx.Payload.TxId,
+			specialTxType, runVmSuccess, applySpecialTx)
+	})
+
+	if !applySpecialTx && s.IsSealed() {
+		return false, s.GetSnapshotSize()
+	}
+	// 乐观处理，以所有交易都不冲突的情况进行优先处理
+	txExecSeq := txSimContext.GetTxExecSeq()
+	var txRWSet *commonPb.TxRWSet
+	var txResult *commonPb.Result
+
+	// Only when the virtual machine is running normally can the read-write set be saved, or write fake conflicted key
+	txRWSet = txSimContext.GetTxRWSet(runVmSuccess)
+	s.log.Debugf("【gas calc】%v, ApplyTxSimContext, txRWSet = %v", txSimContext.GetTx().Payload.TxId, txRWSet)
+	txResult = txSimContext.GetTxResult()
+	// 实现准备好要处理的数据
+	finalReadKvs := make(map[string]*sv, len(txRWSet.TxReads))
+	for _, txRead := range txRWSet.TxReads {
+		finalKey := constructKey(txRead.ContractName, txRead.Key)
+		//从AUXRwMap中读取的sv无法检测是否冲突，因为读取时自动寻找不冲突的最新版本读
+		if rwSlice, ok := s.AUXRwMap[finalKey]; !ok || txExecSeq < rwSlice[0].seq { //如果key不存在于AUXRwMap中
+			// 乐观检查，便于提前发现冲突
+			if sv, ok := s.writeTable.getByLock(finalKey); ok {
+				if sv.seq >= txExecSeq {
+					s.log.Warnf("Key Conflicted %+v-%+v, tx id:%s", sv.seq, txExecSeq, tx.Payload.TxId)
+					return false, len(s.txTable) + len(s.specialTxTable)
+				}
+			}
+			//如果从AUXDataRwMap中读则不能加入readtable会覆盖掉原始版本
+			//直接抛弃似乎没有影响，txRWSet保存了所有的读写，table又仅作为缓存使用
+			//但是最终要加入table因为snapshot会从上一个块的table中寻找最后的读或写
+			finalReadKvs[finalKey] = &sv{
+				value: txRead.Value,
+			}
+		}
+	}
+	finalWriteKvs := make(map[string]*sv, len(txRWSet.TxWrites))
+	// Append to write table
+	//对于写如果key存在于AUXRwMap中，则只在AUXRwMap中更新，不放入table，防止检测出冲突
+
+	for _, txWrite := range txRWSet.TxWrites {
+		finalKey := constructKey(txWrite.ContractName, txWrite.Key)
+		if AUXRw, ok := s.AUXRwMap[finalKey]; !ok || txExecSeq < AUXRw[0].seq {
+			finalWriteKvs[finalKey] = &sv{
+				value: txWrite.Value,
+			}
+		} else { //如果key存在于AUXRwMap中
+			index := 0
+			for i, sv := range AUXRw {
+				if sv.seq < txExecSeq {
+					index = i
+				}
+			}
+			AUXRw[index] = sv{seq: txExecSeq, value: txWrite.Value}
+		}
+	}
+
+	s.lock.Lock()
+	defer s.lock.Unlock()
+	// it is necessary to check sealed secondly
+	if !applySpecialTx && s.IsSealed() {
+		return false, s.GetSnapshotSize()
+	}
+
+	if !applySpecialTx && specialTxType == protocol.ExecOrderTxTypeIterator {
+		s.specialTxTable = append(s.specialTxTable, tx)
+		return true, s.GetSnapshotSize() + len(s.specialTxTable)
+	}
+
+	if specialTxType == protocol.ExecOrderTxTypeIterator || txExecSeq >= len(s.txTable) {
+		s.applyOptimizeWithOrder(tx, txRWSet, txResult, runVmSuccess, finalReadKvs, finalWriteKvs, txExecSeq)
+		return true, s.GetSnapshotSize()
+	}
+
+	// Double-Check
+	// Check whether the dependent state has been modified during the running it
+	start := time.Now()
+	for finalKey := range finalReadKvs {
+		if sv, ok := s.writeTable.getByLock(finalKey); ok {
+			if sv.seq >= txExecSeq {
+				s.log.Warnf("Key Conflicted %+v-%+v, tx id:%s", sv.seq, txExecSeq, tx.Payload.TxId)
+				return false, s.GetSnapshotSize() + len(s.specialTxTable)
+			}
+		}
+	}
+	micro := time.Since(start).Microseconds()
+	s.applyConflictTime.Add(micro)
+
+	s.log.Debugf("tx [%+v] final readKVs is %+v, writeKvs is %+v", txExecSeq, finalReadKvs, finalWriteKvs)
+	s.applyOptimizeWithOrder(tx, txRWSet, txResult, runVmSuccess, finalReadKvs, finalWriteKvs, txExecSeq)
 	return true, s.GetSnapshotSize()
 }
 
@@ -595,6 +737,63 @@ func (s *SnapshotImpl) applyOptimize(tx *commonPb.Transaction, txRWSet *commonPb
 	s.txTable = append(s.txTable, tx)
 }
 
+func (s *SnapshotImpl) applyOptimizeWithOrder(tx *commonPb.Transaction, txRWSet *commonPb.TxRWSet, txResult *commonPb.Result,
+	runVmSuccess bool, finalReadKvs, finalWriteKvs map[string]*sv, txSeq int) {
+	// Append to read table
+	applySeq := txSeq
+	//applySeq := s.GetSnapshotSize()
+	// compatible with version lower than 2201, failed transaction should not apply read set to snapshot
+	// that may cause next transaction read out an error value. Failed transaction can produce invalid read set
+	// by read, write and then read again the same value.
+	var wg sync.WaitGroup
+	wg.Add(1)
+	if s.blockVersion < 2201 || runVmSuccess {
+		wg.Add(1)
+		go func() {
+			start := time.Now()
+			for finalKey, rsv := range finalReadKvs {
+				rsv.seq = applySeq
+				s.readTable.putByLock(finalKey, rsv)
+			}
+			wg.Done()
+			micro := time.Since(start).Microseconds()
+			s.applyAddReadTime.Add(micro)
+		}()
+	}
+
+	// Append to write table
+	go func() {
+		start := time.Now()
+		for finalKey, wsv := range finalWriteKvs {
+			wsv.seq = applySeq
+			s.writeTable.putByLock(finalKey, wsv)
+		}
+		wg.Done()
+		micro := time.Since(start).Microseconds()
+		s.applyAddWriteTime.Add(micro)
+	}()
+	wg.Wait()
+	// Append to read-write-set table
+	s.txRWSetTable = append(s.txRWSetTable, txRWSet)
+	//s.log.DebugDynamic(func() string {
+	//	return fmt.Sprintf("apply tx: %s, rwset.TxReads: %v", tx.Payload.TxId, txRWSet.TxReads)
+	//})
+	//s.log.DebugDynamic(func() string {
+	//	return fmt.Sprintf("apply tx: %s, rwset.TxWrites: %v", tx.Payload.TxId, txRWSet.TxWrites)
+	//})
+	s.log.DebugDynamic(func() string {
+		return fmt.Sprintf("apply tx: %s, rwset table size %d", tx.Payload.TxId, len(s.txRWSetTable))
+	})
+
+	// Add to tx result map
+	s.txResultMap[tx.Payload.TxId] = txResult
+
+	// Add to transaction table
+	s.tableLock.Lock()
+	defer s.tableLock.Unlock()
+	s.txTable = append(s.txTable, tx)
+}
+
 // IsSealed check if snapshot is sealed
 func (s *SnapshotImpl) IsSealed() bool {
 	return s.sealed.Load()
@@ -617,6 +816,7 @@ func (s *SnapshotImpl) GetBlockProposer() *accesscontrol.Member {
 
 // Seal the snapshot
 func (s *SnapshotImpl) Seal() {
+	s.applyAUXRwMap()
 	s.sealed.Store(true)
 	s.log.Infof("block apply time[%d] is %d, %d, %d", s.blockHeight,
 		s.applyConflictTime.Load(), s.applyAddReadTime.Load(), s.applyAddWriteTime.Load())
@@ -711,7 +911,7 @@ func (s *SnapshotImpl) buildReachMap(i uint32, txRWSet *commonPb.TxRWSet, readKe
 	allReachForI := &bitmap.Bitmap{}
 	allReachForI.Set(int(i))
 	directReachForI := &bitmap.Bitmap{}
-
+	enableDAG := s.AUXRwMap != nil
 	//ReadSet && WriteSet conflict
 	for _, keyForI := range readTableItemForI {
 		readKey := string(keyForI.Key)
@@ -721,7 +921,8 @@ func (s *SnapshotImpl) buildReachMap(i uint32, txRWSet *commonPb.TxRWSet, readKe
 		}
 		// just check 1 write key before the tx because write keys all are conflict
 		j := int(writePos[i][readKey]) - 1
-		if j >= 0 && !allReachForI.Has(int(writeKeyTxs[j])) {
+		if j >= 0 && (!enableDAG && !allReachForI.Has(int(writeKeyTxs[j])) || enableDAG) {
+			//if j >= 0 && !allReachForI.Has(int(writeKeyTxs[j])) {
 			directReachForI.Set(int(writeKeyTxs[j]))
 			allReachForI.Or(reachMap[writeKeyTxs[j]])
 		}
@@ -773,4 +974,81 @@ func (s *SnapshotImpl) SetBlockFingerprint(fp utils.BlockFingerPrint) {
 // GetBlockFingerprint returns current block fingerprint
 func (s *SnapshotImpl) GetBlockFingerprint() string {
 	return s.blockFingerprint
+}
+
+// wzy
+type Sv struct {
+	Seq   int    `json:"Seq"`
+	Value []byte `json:"Value"`
+}
+
+func (s *SnapshotImpl) SetAUXRwMap(AUXRwMapBytes []byte) {
+	//wzy
+	if AUXRwMapBytes != nil {
+		AUXRwMap := make(map[string][]Sv)
+		s.log.Debugf("AUXRwMapBytes:%+v", AUXRwMapBytes)
+
+		err := json.Unmarshal(AUXRwMapBytes, &AUXRwMap)
+		if err != nil {
+			s.log.Errorf("Unmarshal AUXRwMap Error %+v", err)
+			return
+		}
+		s.AUXRwMap = make(map[string][]sv)
+		for key, slices := range AUXRwMap {
+			for _, Sv := range slices {
+				s.AUXRwMap[key] = append(s.AUXRwMap[key], sv{value: Sv.Value, seq: Sv.Seq})
+			}
+		}
+		s.log.Debugf("SetAUXRwMap:%+v", s.AUXRwMap)
+	} else {
+		s.AUXRwMap = nil
+		s.log.Warnf("AUXRwMapBytes is empty")
+	}
+}
+func (s *SnapshotImpl) getBatchFromAUXRwMap(keys []*vmPb.BatchKey, txExecSeq int) ([]*vmPb.BatchKey,
+	[]*vmPb.BatchKey, bool) {
+	txWrites := make([]*vmPb.BatchKey, 0, len(keys))
+	emptyTxWrite := make([]*vmPb.BatchKey, 0, len(keys))
+	for _, key := range keys {
+		finalKey := constructKey(key.ContractName, protocol.GetKeyStr(key.Key, key.Field))
+		if AUXRwSlice, ok := s.AUXRwMap[finalKey]; ok {
+			//遍历该key的所有写版本，找到小于txExecSeq的最新版本
+			result := -1
+			for i, sv := range AUXRwSlice {
+				if sv.seq < txExecSeq && sv.seq > result {
+					result = i
+				}
+			}
+			if result != -1 {
+				key.Value = AUXRwSlice[result].value
+				txWrites = append(txWrites, key)
+			} else {
+				emptyTxWrite = append(emptyTxWrite, key)
+			}
+		}
+	}
+
+	if len(emptyTxWrite) == 0 {
+		return txWrites, nil, true
+	}
+	return txWrites, emptyTxWrite, false
+}
+
+func (s *SnapshotImpl) applyAUXRwMap() {
+	if s.AUXRwMap == nil {
+		return
+	}
+	s.log.Debugf("apply AUXRwMap before seal,%+v", s.AUXRwMap)
+	for finalKey, rwSlice := range s.AUXRwMap {
+		final := 0
+		for i, sv := range rwSlice {
+			if sv.seq > rwSlice[final].seq {
+				final = i
+			}
+		}
+		s.writeTable.putByLock(finalKey, &sv{
+			seq:   rwSlice[final].seq,
+			value: rwSlice[final].value,
+		})
+	}
 }
