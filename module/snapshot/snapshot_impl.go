@@ -282,8 +282,8 @@ func (s *SnapshotImpl) GetKeys(txExecSeq int, keys []*vmPb.BatchKey) ([]*vmPb.Ba
 	//	txExecSeq = snapshotSize //nolint: ineffassign, staticcheck
 	//}
 	//wzy
-	enableDAG := s.AUXRwMap != nil
-	if enableDAG {
+	enableDAGPartial := s.AUXRwMap != nil
+	if enableDAGPartial {
 		if AUXRwValues, emptyAUXRwKeys, done = s.getBatchFromAUXRwMap(keys, txExecSeq); done {
 			return writeSetValues, nil
 		}
@@ -312,7 +312,7 @@ func (s *SnapshotImpl) GetKeys(txExecSeq int, keys []*vmPb.BatchKey) ([]*vmPb.Ba
 	if err != nil {
 		return nil, err
 	}
-	if enableDAG {
+	if enableDAGPartial {
 		return append(objects, append(value, append(readSetValues, append(writeSetValues, AUXRwValues...)...)...)...), nil
 	} else {
 		return append(objects, append(value, append(readSetValues, writeSetValues...)...)...), nil
@@ -944,7 +944,7 @@ func (s *SnapshotImpl) buildReachMap(i uint32, txRWSet *commonPb.TxRWSet, readKe
 	allReachForI := &bitmap.Bitmap{}
 	allReachForI.Set(int(i))
 	directReachForI := &bitmap.Bitmap{}
-	enableDAG := s.AUXRwMap != nil
+	enableDAGPartial := s.AUXRwMap != nil
 	//ReadSet && WriteSet conflict
 	for _, keyForI := range readTableItemForI {
 		readKey := string(keyForI.Key)
@@ -954,7 +954,7 @@ func (s *SnapshotImpl) buildReachMap(i uint32, txRWSet *commonPb.TxRWSet, readKe
 		}
 		// just check 1 write key before the tx because write keys all are conflict
 		j := int(writePos[i][readKey]) - 1
-		if j >= 0 && (!enableDAG && !allReachForI.Has(int(writeKeyTxs[j])) || enableDAG) {
+		if j >= 0 && (!enableDAGPartial && !allReachForI.Has(int(writeKeyTxs[j])) || enableDAGPartial) {
 			//if j >= 0 && !allReachForI.Has(int(writeKeyTxs[j])) {
 			directReachForI.Set(int(writeKeyTxs[j]))
 			allReachForI.Or(reachMap[writeKeyTxs[j]])
