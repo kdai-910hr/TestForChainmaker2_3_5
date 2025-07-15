@@ -9,6 +9,7 @@ package scheduler
 
 import (
 	"bytes"
+	"chainmaker.org/chainmaker-go/module/core/common/switch_control"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -23,7 +24,6 @@ import (
 	"time"
 
 	"chainmaker.org/chainmaker-go/module/core/common/coinbasemgr"
-	"chainmaker.org/chainmaker-go/module/core/common/stalecontrol"
 	"chainmaker.org/chainmaker-go/module/core/provider/conf"
 	"chainmaker.org/chainmaker/common/v2/crypto"
 	"chainmaker.org/chainmaker/localconf/v2"
@@ -76,6 +76,8 @@ type TxScheduler struct {
 	ac              protocol.AccessControlProvider
 	//wzy
 	txTimeCostChan chan txIdwithTime
+	//zyf
+	switchController switch_control.SwitchControllerImpl
 }
 
 // wzy
@@ -232,7 +234,7 @@ func (ts *TxScheduler) Schedule(block *commonPb.Block, txBatch []*commonPb.Trans
 	// TODO ZYF BuildDAG或者走一个代价模型，应该返回应当使用哪种调度策略 1,2,...
 	// 然后将这个策略写入到block.AdditionalData中
 	block.AdditionalData.ExtraData[TBFTAdditionalDataSchedule] = []byte("1")
-	ts.log.Infof("ZYF add schedule method args to block additional data success: ", 1)
+	ts.log.Infof("ZYF add schedule method args to block additional data success: %d", 1)
 	ts.handleSpecialTxs(blockVersion, block, snapshot, txBatchSize, senderCollection, enableOptimizeChargeGas)
 
 	// if the block is not empty, append the charging gas tx
@@ -390,7 +392,7 @@ func handleTx(block *commonPb.Block, snapshot protocol.Snapshot,
 
 	// Apply failed means this tx's read set conflict with other txs' write set
 	// 🚀 获取 Stale Read Keys 并存入 TxSimContext
-	if stalecontrol.IsEnabled() {
+	if ts.switchController.Controllers[switch_control.StaleControl].IsEnabled() {
 		staleReadKeys := txSimContext.GetStaleReadKeys()
 		if len(staleReadKeys) > 0 {
 			ts.log.Warnf("Tx [%s] detected stale reads: %+v", tx.GetPayload().TxId, staleReadKeys)
@@ -401,7 +403,7 @@ func handleTx(block *commonPb.Block, snapshot protocol.Snapshot,
 	// WJY: applyResult 表示是否成功应用，applySize 表示当前快照中已应用的交易数量。
 	// WJY: 如果应用失败，说明该交易的读写集与其他交易发生冲突
 	applyResult, applySize := snapshot.ApplyTxSimContext(txSimContext, specialTxType,
-		runVmSuccess, false)
+		runVmSuccess, false, ts.switchController.Controllers)
 	ts.log.DebugDynamic(func() string {
 		return fmt.Sprintf("handleTx(`%v`) => ApplyTxSimContext(...) => snapshot.txTable = %v, applySize = %v",
 			tx.GetPayload().TxId, len(snapshot.GetTxTable()), applySize)
@@ -757,7 +759,7 @@ func handleTxInSimulateWithDag(
 	//txSimContext, specialTxType, runVmSuccess := ts.executeTx(tx, snapshot, block, collection)
 
 	// if apply failed means this tx's read set conflict with other txs' write set
-	isApplySuccess, applySize := snapshot.ApplyTxSimContext(txSimContext, specialTxType, runVmSuccess, true)
+	isApplySuccess, applySize := snapshot.ApplyTxSimContext(txSimContext, specialTxType, runVmSuccess, true, ts.switchController.Controllers)
 	doneTxC <- &applyResult{txIndex, isApplySuccess, applySize}
 	if !isApplySuccess {
 		ts.log.Warnf("failed to apply snapshot for tx id:%s, shouldn't have its rwset",
@@ -1035,7 +1037,7 @@ func (ts *TxScheduler) simulateSpecialTxs(specialTxs []*commonPb.Transaction, da
 				txSimContext, specialTxType, runVmSuccess := ts.executeTx(tx, snapshot, block, collection)
 				tx.Result = txSimContext.GetTxResult()
 				// apply tx
-				applyResult, applySize := snapshot.ApplyTxSimContext(txSimContext, specialTxType, runVmSuccess, true)
+				applyResult, applySize := snapshot.ApplyTxSimContext(txSimContext, specialTxType, runVmSuccess, true, ts.switchController.Controllers)
 				if !applyResult {
 					ts.log.Debugf("failed to apply according to dag with tx %s ", tx.Payload.TxId)
 					runningTxC <- tx
@@ -1845,7 +1847,7 @@ func (ts *TxScheduler) executeChargeGasTx(
 	snapshot.ApplyTxSimContext(
 		txSimContext,
 		protocol.ExecOrderTxTypeChargeGas,
-		true, true)
+		true, true, ts.switchController.Controllers)
 
 	return txSimContext
 }

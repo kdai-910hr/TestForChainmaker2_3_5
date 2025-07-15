@@ -315,7 +315,7 @@ func testSnapshot(t *testing.T, i int) {
 			txSimContext.txExecSeq = int32(rand.Intn(len(snapshot.txTable) + 1)) //nolint: gosec
 
 			applyResult, _ := snapshot.ApplyTxSimContext(txSimContext, protocol.ExecOrderTxTypeNormal,
-				true, false)
+				true, false, nil)
 			atomic.AddInt64(&count, 1)
 			if !applyResult {
 				fmt.Printf("!!!")
@@ -333,7 +333,7 @@ func testSnapshot(t *testing.T, i int) {
 									randNum,
 								),
 							)
-						applyResult, _ = snapshot.ApplyTxSimContext(txSimContext, protocol.ExecOrderTxTypeNormal, true, false)
+						applyResult, _ = snapshot.ApplyTxSimContext(txSimContext, protocol.ExecOrderTxTypeNormal, true, false, nil)
 
 						atomic.AddInt64(&count, 1)
 						if applyResult {
@@ -408,7 +408,7 @@ func genRwSet(readKeySet []string, writeKeySet []string) *commonPb.TxRWSet {
 }
 
 func testApply(txSimContext protocol.TxSimContext, snapshot *SnapshotImpl, txExecSeq int, readKeySet []string, writeKeySet []string) (bool, int) {
-	return snapshot.ApplyTxSimContext(txSimContext, protocol.ExecOrderTxTypeNormal, true, false)
+	return snapshot.ApplyTxSimContext(txSimContext, protocol.ExecOrderTxTypeNormal, true, false, nil)
 }
 
 func dump(snapshot *SnapshotImpl) {
@@ -1042,7 +1042,7 @@ func TestReBuildDag(t *testing.T) {
 					currentDepth: 0,
 					txResult:     nil,
 				}
-				s.ApplyTxSimContext(txSimContext, protocol.ExecOrderTxTypeNormal, true, false)
+				s.ApplyTxSimContext(txSimContext, protocol.ExecOrderTxTypeNormal, true, false, nil)
 			}
 			if got := s.BuildDAG(tt.args.isSql, tt.blockDagRwSetTable); !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("BuildDAG() = %v, want %v", got, tt.want)
@@ -1135,7 +1135,7 @@ func TestApplyTxSimContext_NoConflict(t *testing.T) {
 	}
 
 	// 调用 ApplyTxSimContext，应该无冲突且写入成功
-	ok, size := s.ApplyTxSimContext(mockCtx1, protocol.ExecOrderTxTypeNormal, true, false)
+	ok, size := s.ApplyTxSimContext(mockCtx1, protocol.ExecOrderTxTypeNormal, true, false, nil)
 	if !ok {
 		t.Fatalf("第1次写入不应发生冲突，got ok = %v", ok)
 	}
@@ -1152,7 +1152,7 @@ func TestApplyTxSimContext_NoConflict(t *testing.T) {
 		txResult:      &commonPb.Result{Code: commonPb.TxStatusCode_SUCCESS},
 		staleReadKeys: nil,
 	}
-	ok2, size2 := s.ApplyTxSimContext(mockCtx2, protocol.ExecOrderTxTypeNormal, true, false)
+	ok2, size2 := s.ApplyTxSimContext(mockCtx2, protocol.ExecOrderTxTypeNormal, true, false, nil)
 	if !ok2 {
 		t.Fatalf("第2次写入（txExecSeq=1）不应发生冲突，got ok=%v", ok2)
 	}
@@ -1192,7 +1192,7 @@ func TestApplyTxSimContext_StaleRead(t *testing.T) {
 		txResult:      &commonPb.Result{Code: commonPb.TxStatusCode_SUCCESS},
 		staleReadKeys: nil,
 	}
-	ok1, size1 := s.ApplyTxSimContext(mockCtx1, protocol.ExecOrderTxTypeNormal, true, false)
+	ok1, size1 := s.ApplyTxSimContext(mockCtx1, protocol.ExecOrderTxTypeNormal, true, false, nil)
 	if !ok1 || size1 != 1 {
 		t.Fatalf("写入阶段出错，expected ok1=true,size1=1, got ok1=%v,size1=%d", ok1, size1)
 	}
@@ -1209,7 +1209,7 @@ func TestApplyTxSimContext_StaleRead(t *testing.T) {
 		staleReadKeys: nil,
 	}
 
-	ok2, size2 := s.ApplyTxSimContext(mockCtx2, protocol.ExecOrderTxTypeNormal, true, false)
+	ok2, size2 := s.ApplyTxSimContext(mockCtx2, protocol.ExecOrderTxTypeNormal, true, false, nil)
 	if ok2 {
 		t.Fatalf("应当检测到陈旧读冲突，expected ok2=false，got ok2=true")
 	}

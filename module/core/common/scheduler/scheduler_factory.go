@@ -7,6 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 package scheduler
 
 import (
+	"chainmaker.org/chainmaker-go/module/core/common/switch_control"
 	"fmt"
 	"regexp"
 	"sync"
@@ -40,15 +41,16 @@ func newTxScheduler(vmMgr protocol.VmManager, chainConf protocol.ChainConf,
 	log := logger.GetLoggerByChain(logger.MODULE_CORE, chainConf.ChainConfig().ChainId)
 	log.Debugf("use the common TxScheduler.")
 	var txScheduler = &TxScheduler{
-		lock:            sync.Mutex{},
-		VmManager:       vmMgr,
-		scheduleFinishC: make(chan bool),
-		log:             log,
-		chainConf:       chainConf,
-		StoreHelper:     storeHelper,
-		ledgerCache:     cache,
-		contractCache:   &sync.Map{},
-		ac:              ac,
+		lock:             sync.Mutex{},
+		VmManager:        vmMgr,
+		scheduleFinishC:  make(chan bool),
+		log:              log,
+		chainConf:        chainConf,
+		StoreHelper:      storeHelper,
+		ledgerCache:      cache,
+		contractCache:    &sync.Map{},
+		ac:               ac,
+		switchController: switch_control.NewSwitchControllerImpl(log),
 	}
 	var err error
 	txScheduler.keyReg, err = regexp.Compile(protocol.DefaultStateRegex)
@@ -110,14 +112,15 @@ func newTxSchedulerEvidence(vmMgr protocol.VmManager, chainConf protocol.ChainCo
 	log.Debugf("use the evidence TxScheduler.")
 	txSchedulerEvidence := &TxSchedulerEvidence{
 		delegate: &TxScheduler{
-			lock:            sync.Mutex{},
-			VmManager:       vmMgr,
-			scheduleFinishC: make(chan bool),
-			log:             log,
-			chainConf:       chainConf,
-			StoreHelper:     storeHelper,
-			ledgerCache:     cache,
-			contractCache:   &sync.Map{},
+			lock:             sync.Mutex{},
+			VmManager:        vmMgr,
+			scheduleFinishC:  make(chan bool),
+			log:              log,
+			chainConf:        chainConf,
+			StoreHelper:      storeHelper,
+			ledgerCache:      cache,
+			contractCache:    &sync.Map{},
+			switchController: switch_control.NewSwitchControllerImpl(log),
 		},
 	}
 	var err error

@@ -128,7 +128,7 @@ func (s *SnapshotEvidence) ApplyTxSimContext(txSimContext protocol.TxSimContext,
 	if s.delegate == nil {
 		return false, -1
 	}
-	return s.delegate.ApplyTxSimContext(txSimContext, specialTxType, runVmSuccess, withSpecialTx)
+	return s.delegate.ApplyTxSimContext(txSimContext, specialTxType, runVmSuccess, withSpecialTx, nil)
 }
 
 // check if snapshot is sealed

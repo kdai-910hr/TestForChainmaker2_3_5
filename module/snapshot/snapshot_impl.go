@@ -8,7 +8,7 @@ SPDX-License-Identifier: Apache-2.0
 package snapshot
 
 import (
-	"chainmaker.org/chainmaker-go/module/core/common/stalecontrol"
+	"chainmaker.org/chainmaker-go/module/core/common/switch_control"
 	"encoding/json"
 	"fmt"
 	"sync"
@@ -25,9 +25,6 @@ import (
 	"chainmaker.org/chainmaker/protocol/v2"
 	"chainmaker.org/chainmaker/utils/v2"
 )
-
-// TODO 这里先使用全局变量，后续可以改为配置
-var enableBatch bool = true
 
 // The record value is written by the SEQ corresponding to TX
 type sv struct {
@@ -393,7 +390,8 @@ func (s *SnapshotImpl) getBatchFromReadSet(keys []*vmPb.BatchKey) ([]*vmPb.Batch
 
 // ApplyTxSimContext add TxSimContext to the snapshot, return current applied tx num whether success of not
 func (s *SnapshotImpl) ApplyTxSimContext(txSimContext protocol.TxSimContext, specialTxType protocol.ExecOrderTxType,
-	runVmSuccess bool, applySpecialTx bool) (bool, int) {
+	runVmSuccess bool, applySpecialTx bool, _controllers interface{}) (bool, int) {
+	controllers := _controllers.(map[switch_control.ControlType]switch_control.SwitchController)
 	//wzy
 	if s.AUXRwMap != nil && len(s.AUXRwMap) != 0 {
 		return s.applyTxSimContextWithOrder(txSimContext, specialTxType, runVmSuccess, applySpecialTx)
@@ -413,6 +411,9 @@ func (s *SnapshotImpl) ApplyTxSimContext(txSimContext protocol.TxSimContext, spe
 	var txRWSet *commonPb.TxRWSet
 	var txResult *commonPb.Result
 
+	enableBatch := controllers != nil && controllers[switch_control.PartDAGControl].IsEnabled()
+	enableStale := controllers != nil && controllers[switch_control.StaleControl].IsEnabled()
+
 	if enableBatch {
 		s.log.Info("-------------执行到批处理交易调度代码部分---------")
 	}
@@ -431,7 +432,7 @@ func (s *SnapshotImpl) ApplyTxSimContext(txSimContext protocol.TxSimContext, spe
 				// WJY: 若存在相同键且执行序列更高的写操作，则发生冲突，返回 false
 				if sv.seq >= txExecSeq {
 					s.log.Debugf("Key Conflicted %+v-%+v, tx id:%s", sv.seq, txExecSeq, tx.Payload.TxId)
-					if stalecontrol.IsEnabled() {
+					if enableStale {
 						// 在这里加日志
 						s.log.Warnf("[STALEREAD-DETECT] txid=%s detected stale-read on key=%s, sv.seq=%d, txExecSeq=%d",
 							tx.Payload.TxId, finalKey, sv.seq, txExecSeq)
@@ -510,7 +511,7 @@ func (s *SnapshotImpl) ApplyTxSimContext(txSimContext protocol.TxSimContext, spe
 		if sv, ok := s.writeTable.getByLock(finalKey); ok {
 			// WJY: 遍历 finalReadKvs 中的每个键，检查是否已被 writeTable 中的更新覆盖。
 			// WJY: 如果有冲突，则返回 false
-			if stalecontrol.IsEnabled() {
+			if enableStale {
 				if sv.seq >= txExecSeq {
 					s.log.Debugf("Key Conflicted %+v-%+v, tx id:%s", sv.seq, txExecSeq, tx.Payload.TxId)
 					s.log.Warnf("⚠️ [%s] Detected Stale Read Key: %s", txSimContext.GetTx().Payload.TxId, finalKey)
