@@ -122,7 +122,7 @@ type SwitchControllerImpl struct {
 	Controllers map[ControlType]SwitchController
 }
 
-func NewSwitchControllerImpl(log protocol.Logger) SwitchControllerImpl {
+func NewSwitchControllerImpl(log protocol.Logger) *SwitchControllerImpl {
 	ret := SwitchControllerImpl{
 		Controllers: make(map[ControlType]SwitchController),
 	}
@@ -131,7 +131,7 @@ func NewSwitchControllerImpl(log protocol.Logger) SwitchControllerImpl {
 			ret.Controllers[controlType] = constructor(log)
 		}
 	}
-	return ret
+	return &ret
 }
 
 func (s *SwitchControllerImpl) IsEnabled(controlType ControlType) bool {

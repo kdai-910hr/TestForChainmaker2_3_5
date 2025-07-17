@@ -124,11 +124,11 @@ func (s *SnapshotEvidence) GetKey(txExecSeq int, contractName string, key []byte
 // After the read-write set is generated, add TxSimContext to the snapshot
 // return if apply successfully or not, and current applied tx num
 func (s *SnapshotEvidence) ApplyTxSimContext(txSimContext protocol.TxSimContext, specialTxType protocol.ExecOrderTxType,
-	runVmSuccess bool, withSpecialTx bool) (bool, int) {
+	runVmSuccess bool, withSpecialTx bool, _controllers interface{}) (bool, int) {
 	if s.delegate == nil {
 		return false, -1
 	}
-	return s.delegate.ApplyTxSimContext(txSimContext, specialTxType, runVmSuccess, withSpecialTx, nil)
+	return s.delegate.ApplyTxSimContext(txSimContext, specialTxType, runVmSuccess, withSpecialTx, _controllers)
 }
 
 // check if snapshot is sealed

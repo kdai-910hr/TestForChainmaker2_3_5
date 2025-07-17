@@ -14,12 +14,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -77,7 +75,7 @@ type TxScheduler struct {
 	//wzy
 	txTimeCostChan chan txIdwithTime
 	//zyf
-	switchController switch_control.SwitchControllerImpl
+	switchController *switch_control.SwitchControllerImpl
 }
 
 // wzy
@@ -97,10 +95,6 @@ type applyResult struct {
 	txIndex        int
 	isApplySuccess bool
 	applySize      int
-}
-
-func isStaleReadProtectionEnabled() bool {
-	return strings.ToLower(os.Getenv("STALE_READ_PROTECTION_ENABLED")) == "true"
 }
 
 // Schedule according to a batch of transactions,
@@ -165,8 +159,8 @@ func (ts *TxScheduler) Schedule(block *commonPb.Block, txBatch []*commonPb.Trans
 	}
 	//wzy
 	//切分起点
-	enableDAGpartial := true //ts.chainConf.ChainConfig().Core.EnableDAGpartial
-	if enableDAGpartial {
+	enableDAGPartial := ts.switchController.IsEnabled(switch_control.PartDAGControl) //ts.chainConf.ChainConfig().Core.EnableDAGpartial
+	if enableDAGPartial {
 		ts.txTimeCostChan = make(chan txIdwithTime, txBatchSize)
 	} else {
 		ts.txTimeCostChan = nil
@@ -252,7 +246,7 @@ func (ts *TxScheduler) Schedule(block *commonPb.Block, txBatch []*commonPb.Trans
 	contractEventMap := ts.getContractEventMap(block)
 	//wzy
 	//判断是否需要分割dag
-	if enableDAGpartial {
+	if enableDAGPartial {
 		AUXRwMap := ts.partDAG(block, txRWSetMap)
 		AUXRwMapBytes, _ := json.Marshal(AUXRwMap)
 		block.AdditionalData.ExtraData["AUXRwMap"] = AUXRwMapBytes
@@ -370,8 +364,9 @@ func handleTx(block *commonPb.Block, snapshot protocol.Snapshot,
 	var start time.Time
 	//wzy
 
-	enableDAGpartial := false //ts.chainConf.ChainConfig().Core.EnableDAGpartial
-	if localconf.ChainMakerConfig.MonitorConfig.Enabled || enableDAGpartial {
+	enableDAGPartial := ts.switchController.IsEnabled(switch_control.PartDAGControl) //ts.chainConf.ChainConfig().Core.EnableDAGpartial
+	enableStaleKey := ts.switchController.IsEnabled(switch_control.StaleControl)
+	if localconf.ChainMakerConfig.MonitorConfig.Enabled || enableDAGPartial {
 		start = time.Now()
 	}
 
@@ -392,7 +387,7 @@ func handleTx(block *commonPb.Block, snapshot protocol.Snapshot,
 
 	// Apply failed means this tx's read set conflict with other txs' write set
 	// 🚀 获取 Stale Read Keys 并存入 TxSimContext
-	if ts.switchController.Controllers[switch_control.StaleControl].IsEnabled() {
+	if enableStaleKey {
 		staleReadKeys := txSimContext.GetStaleReadKeys()
 		if len(staleReadKeys) > 0 {
 			ts.log.Warnf("Tx [%s] detected stale reads: %+v", tx.GetPayload().TxId, staleReadKeys)
@@ -403,7 +398,7 @@ func handleTx(block *commonPb.Block, snapshot protocol.Snapshot,
 	// WJY: applyResult 表示是否成功应用，applySize 表示当前快照中已应用的交易数量。
 	// WJY: 如果应用失败，说明该交易的读写集与其他交易发生冲突
 	applyResult, applySize := snapshot.ApplyTxSimContext(txSimContext, specialTxType,
-		runVmSuccess, false, ts.switchController.Controllers)
+		runVmSuccess, false, ts.switchController)
 	ts.log.DebugDynamic(func() string {
 		return fmt.Sprintf("handleTx(`%v`) => ApplyTxSimContext(...) => snapshot.txTable = %v, applySize = %v",
 			tx.GetPayload().TxId, len(snapshot.GetTxTable()), applySize)
@@ -759,7 +754,7 @@ func handleTxInSimulateWithDag(
 	//txSimContext, specialTxType, runVmSuccess := ts.executeTx(tx, snapshot, block, collection)
 
 	// if apply failed means this tx's read set conflict with other txs' write set
-	isApplySuccess, applySize := snapshot.ApplyTxSimContext(txSimContext, specialTxType, runVmSuccess, true, ts.switchController.Controllers)
+	isApplySuccess, applySize := snapshot.ApplyTxSimContext(txSimContext, specialTxType, runVmSuccess, true, ts.switchController)
 	doneTxC <- &applyResult{txIndex, isApplySuccess, applySize}
 	if !isApplySuccess {
 		ts.log.Warnf("failed to apply snapshot for tx id:%s, shouldn't have its rwset",

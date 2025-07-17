@@ -391,7 +391,12 @@ func (s *SnapshotImpl) getBatchFromReadSet(keys []*vmPb.BatchKey) ([]*vmPb.Batch
 // ApplyTxSimContext add TxSimContext to the snapshot, return current applied tx num whether success of not
 func (s *SnapshotImpl) ApplyTxSimContext(txSimContext protocol.TxSimContext, specialTxType protocol.ExecOrderTxType,
 	runVmSuccess bool, applySpecialTx bool, _controllers interface{}) (bool, int) {
-	controllers := _controllers.(map[switch_control.ControlType]switch_control.SwitchController)
+	enableBatch := false
+	enableStale := false
+	if controllers, ok := _controllers.(*switch_control.SwitchControllerImpl); ok {
+		enableBatch = controllers.IsEnabled(switch_control.PartDAGControl)
+		enableStale = controllers.IsEnabled(switch_control.StaleControl)
+	}
 	//wzy
 	if s.AUXRwMap != nil && len(s.AUXRwMap) != 0 {
 		return s.applyTxSimContextWithOrder(txSimContext, specialTxType, runVmSuccess, applySpecialTx)
@@ -410,9 +415,6 @@ func (s *SnapshotImpl) ApplyTxSimContext(txSimContext protocol.TxSimContext, spe
 	txExecSeq := txSimContext.GetTxExecSeq()
 	var txRWSet *commonPb.TxRWSet
 	var txResult *commonPb.Result
-
-	enableBatch := controllers != nil && controllers[switch_control.PartDAGControl].IsEnabled()
-	enableStale := controllers != nil && controllers[switch_control.StaleControl].IsEnabled()
 
 	if enableBatch {
 		s.log.Info("-------------执行到批处理交易调度代码部分---------")
