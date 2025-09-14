@@ -365,7 +365,6 @@ func handleTx(block *commonPb.Block, snapshot protocol.Snapshot,
 	//wzy
 
 	enableDAGPartial := ts.switchController.IsEnabled(switch_control.PartDAGControl) //ts.chainConf.ChainConfig().Core.EnableDAGpartial
-	enableStaleKey := ts.switchController.IsEnabled(switch_control.StaleControl)
 	if localconf.ChainMakerConfig.MonitorConfig.Enabled || enableDAGPartial {
 		start = time.Now()
 	}
@@ -385,14 +384,6 @@ func handleTx(block *commonPb.Block, snapshot protocol.Snapshot,
 		return fmt.Sprintf("handleTx(`%v`) => executeTx(...) => runVmSuccess = %v", tx.GetPayload().TxId, runVmSuccess)
 	})
 
-	// Apply failed means this tx's read set conflict with other txs' write set
-	// 🚀 获取 Stale Read Keys 并存入 TxSimContext
-	if enableStaleKey {
-		staleReadKeys := txSimContext.GetStaleReadKeys()
-		if len(staleReadKeys) > 0 {
-			ts.log.Warnf("Tx [%s] detected stale reads: %+v", tx.GetPayload().TxId, staleReadKeys)
-		}
-	}
 
 	// WJY: 调用 ApplyTxSimContext 方法尝试将交易应用到 snapshot 中。
 	// WJY: applyResult 表示是否成功应用，applySize 表示当前快照中已应用的交易数量。
