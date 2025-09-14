@@ -97,13 +97,6 @@ type applyResult struct {
 	applySize      int
 }
 
-func (ts *TxScheduler) GetSwitchController() *switch_control.SwitchControllerImpl {
-	if ts.switchController == nil {
-		ts.switchController = switch_control.NewSwitchControllerImpl(ts.log)
-	}
-	return ts.switchController
-}
-
 // Schedule according to a batch of transactions,
 // and generating DAG according to the conflict relationship
 func (ts *TxScheduler) Schedule(block *commonPb.Block, txBatch []*commonPb.Transaction,
@@ -234,9 +227,9 @@ func (ts *TxScheduler) Schedule(block *commonPb.Block, txBatch []*commonPb.Trans
 	block.Dag = snapshot.BuildDAG(ts.chainConf.ChainConfig().Contract.EnableSqlSupport, nil)
 	// TODO ZYF BuildDAG或者走一个代价模型，应该返回应当使用哪种调度策略 1,2,...
 	// 然后将这个策略写入到block.AdditionalData中
-	stratagy := switch_control.DeriveAlgorithm(block.Dag)
-	block.AdditionalData.ExtraData[TBFTAdditionalDataSchedule] = []byte(strconv.Itoa(int(stratagy)))
-	ts.log.Infof("ZYF add schedule method args to block additional data success: %d", 1)
+	strategy := switch_control.DeriveAlgorithm(block.Dag)
+	block.AdditionalData.ExtraData[TBFTAdditionalDataSchedule] = []byte(strconv.Itoa(int(strategy)))
+	ts.log.Infof("ZYF add schedule method args to block additional data success: %d", int(strategy))
 	ts.handleSpecialTxs(blockVersion, block, snapshot, txBatchSize, senderCollection, enableOptimizeChargeGas)
 
 	// if the block is not empty, append the charging gas tx
@@ -742,7 +735,9 @@ func (ts *TxScheduler) SimulateWithDag(block *commonPb.Block, snapshot protocol.
 	defer ts.lock.Unlock()
 
 	defer ts.releaseContractCache()
-
+	strategy, _ := strconv.Atoi(string(block.AdditionalData.ExtraData["TBFTAdditionalDataSchedule"]))
+	ts.switchController.TryEnable(switch_control.ControlType(strategy))
+	ts.log.Infof("ZYF using strategy " + string(strategy) + "!")
 	var (
 		startTime  = time.Now()
 		txRWSetMap = make(map[string]*commonPb.TxRWSet, len(block.Txs))
