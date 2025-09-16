@@ -737,7 +737,7 @@ func (ts *TxScheduler) SimulateWithDag(block *commonPb.Block, snapshot protocol.
 	defer ts.releaseContractCache()
 	strategy, _ := strconv.Atoi(string(block.AdditionalData.ExtraData["TBFTAdditionalDataSchedule"]))
 	ts.switchController.TryEnable(switch_control.ControlType(strategy))
-	ts.log.Infof("ZYF using strategy " + string(strategy) + "!")
+	ts.log.Infof("ZYF using strategy " + string((int)strategy) + "!")
 	var (
 		startTime  = time.Now()
 		txRWSetMap = make(map[string]*commonPb.TxRWSet, len(block.Txs))
