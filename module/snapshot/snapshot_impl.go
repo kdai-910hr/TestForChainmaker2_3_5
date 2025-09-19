@@ -136,10 +136,6 @@ func (s *SnapshotImpl) GetBlockchainStore() protocol.BlockchainStore {
 	return s.blockchainStore
 }
 
-func (s *SnapshotImpl) GetStaleReadKeys() []string {
-	return s.staleReadKeys
-}
-
 func (s *SnapshotImpl) AddStaleReadKey(key string) {
 	if s.staleReadKeys == nil {
 		s.staleReadKeys = make([]string, 0)
@@ -398,7 +394,7 @@ func (s *SnapshotImpl) ApplyTxSimContext(txSimContext protocol.TxSimContext, spe
 		enableStale = controllers.IsEnabled(switch_control.StaleControl)
 	}
 	//wzy
-	if s.AUXRwMap != nil && len(s.AUXRwMap) != 0 {
+	if s.AUXRwMap != nil {
 		return s.applyTxSimContextWithOrder(txSimContext, specialTxType, runVmSuccess, applySpecialTx)
 	}
 
