@@ -729,7 +729,7 @@ func (vb *VerifierBlock) ValidateBlock(
 	vb.storeHelper.BeginDbTransaction(snapshot.GetBlockchainStore(), block.GetTxKey())
 
 	startVMTick := utils.CurrentTimeMillisSeconds()
-	vb.log.Infof("ZYF Using Strategy " + strconv.Itoa(strategy) + "!")
+	vb.log.Infof("ZYF Using Strategy " + strconv.Itoa((int)strategy) + "!")
 	txRWSetMap, txResultMap, err := vb.txScheduler.SimulateWithDag(block, snapshot)
 	vmLasts := utils.CurrentTimeMillisSeconds() - startVMTick
 	vb.log.Infof("Validate block[%v](txs:%v), time used(new snapshot:%v, start DB transaction:%v, vm:%v)",
