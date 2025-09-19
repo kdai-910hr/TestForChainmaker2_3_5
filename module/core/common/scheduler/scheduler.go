@@ -127,7 +127,7 @@ func (ts *TxScheduler) Schedule(block *commonPb.Block, txBatch []*commonPb.Trans
 	poolCapacity := ts.StoreHelper.GetPoolCapacity()
 	// poolCapacity := ts.StoreHelper.GetPoolCapacity()
 	//原来的默认值为cpu数量4倍，单机4节点情况下一个节点平均最多获得1/4数量的线程
-	poolCapacity = poolCapacity / 16
+	poolCapacity = poolCapacity / 4
 	ts.log.Infof("GetPoolCapacity() => %v", poolCapacity)
 	if goRoutinePool, err = ants.NewPool(poolCapacity, ants.WithPreAlloc(false)); err != nil {
 		return nil, nil, err
@@ -227,8 +227,9 @@ func (ts *TxScheduler) Schedule(block *commonPb.Block, txBatch []*commonPb.Trans
 	block.Dag = snapshot.BuildDAG(ts.chainConf.ChainConfig().Contract.EnableSqlSupport, nil)
 	// TODO ZYF BuildDAG或者走一个代价模型，应该返回应当使用哪种调度策略 1,2,...
 	// 然后将这个策略写入到block.AdditionalData中
-	block.AdditionalData.ExtraData[TBFTAdditionalDataSchedule] = []byte("1")
-	ts.log.Infof("ZYF add schedule method args to block additional data success: %d", 1)
+	strategy := switch_control.DeriveAlgorithm(block.Dag)
+	block.AdditionalData.ExtraData[TBFTAdditionalDataSchedule] = []byte(strconv.Itoa(int(strategy)))
+	ts.log.Infof("ZYF add schedule method args to block additional data success: %d", int(strategy))
 	ts.handleSpecialTxs(blockVersion, block, snapshot, txBatchSize, senderCollection, enableOptimizeChargeGas)
 
 	// if the block is not empty, append the charging gas tx
@@ -261,6 +262,14 @@ func (ts *TxScheduler) startTxHandler(runningTxC chan *commonPb.Transaction,
 	enableSenderGroup bool, senderGroup *SenderGroup, senderCollection *SenderCollection,
 	timeoutC <-chan time.Time, enableOptimizeChargeGas bool, parallelTxsNum int) {
 	counter := 0 // WJY: counter 用于跟踪交易处理次数，便于后续调试和日志记录
+	ts.log.Infof("running channel size is %d", cap(runningTxC))
+	failTxWithRwsetC := make(chan *commonPb.TransactionWithRWSet, cap(runningTxC))
+	failTxSet := make([]*commonPb.Transaction, 0, cap(runningTxC))
+	failTxRwSet := make([]*commonPb.TxRWSet, 0, cap(runningTxC))
+
+	// wzy标记是否已经处理过失败的交易
+	failTxProcessed := false
+
 	for {
 		select {
 		case tx := <-runningTxC:
@@ -269,12 +278,32 @@ func (ts *TxScheduler) startTxHandler(runningTxC chan *commonPb.Transaction,
 			// WJY: 调用 goRoutinePool.Submit 将 handleTx 函数作为任务提交给 Goroutine 池
 			err := goRoutinePool.Submit(func() {
 				// WJY: handleTx 函数处理交易的具体逻辑，并涉及冲突检测、发送方分组和快照更新等操作
-				handleTx(block, snapshot, ts, tx, runningTxC, finishC, goRoutinePool, parallelTxsNum,
+				handleTx(block, snapshot, ts, tx, runningTxC, finishC, failTxWithRwsetC, goRoutinePool, parallelTxsNum,
 					enableConflictsBitWindow, conflictsBitWindow, enableSenderGroup, senderGroup, senderCollection)
 			})
 			if err != nil {
 				ts.log.Warnf("failed to submit running task, tx id:%s during schedule, %+v",
 					tx.Payload.GetTxId(), err)
+			}
+		//wzy收集失败交易
+		case txWithRwSet := <-failTxWithRwsetC:
+			if txWithRwSet != nil {
+				failTxRwSet = append(failTxRwSet, txWithRwSet.RwSet)
+				failTxSet = append(failTxSet, txWithRwSet.Transaction)
+				ts.log.Infof("tx id:%s, resieve :%d fail tx", txWithRwSet.Transaction.Payload.TxId, len(failTxSet))
+			}
+			// 只有当收集到足够多的交易且尚未处理过失败交易时，才进行处理
+			if !failTxProcessed && len(snapshot.GetTxTable())+len(failTxSet) >= parallelTxsNum {
+				ts.log.Infof("start handle fail txs, fail tx size:%d, snapshot tx size:%d", len(failTxSet), len(snapshot.GetTxTable()))
+				failTxProcessed = true
+				err := goRoutinePool.Submit(func() {
+					ts.startFailTxHandler(failTxRwSet, failTxSet, block, snapshot, goRoutinePool, parallelTxsNum, finishC, timeoutC,
+						enableConflictsBitWindow, conflictsBitWindow, enableSenderGroup, senderGroup, senderCollection)
+				})
+				if err != nil {
+					ts.log.Warnf("failed to submit handle fail txs task")
+					failTxProcessed = false
+				}
 			}
 		case <-timeoutC:
 			// 从 timeoutC 通道接收到超时信号，表示调度达到了设定的时间限制
@@ -349,6 +378,7 @@ func (ts *TxScheduler) handleSpecialTxs(blockVersion uint32, block *commonPb.Blo
 func handleTx(block *commonPb.Block, snapshot protocol.Snapshot,
 	ts *TxScheduler, tx *commonPb.Transaction,
 	runningTxC chan *commonPb.Transaction, finishC chan bool,
+	failTxWithRwsetC chan *commonPb.TransactionWithRWSet,
 	goRoutinePool *ants.Pool, txBatchSize int,
 	enableConflictsBitWindow bool, conflictsBitWindow *ConflictsBitWindow,
 	enableSenderGroup bool, senderGroup *SenderGroup, senderCollection *SenderCollection) {
@@ -384,7 +414,7 @@ func handleTx(block *commonPb.Block, snapshot protocol.Snapshot,
 		return fmt.Sprintf("handleTx(`%v`) => executeTx(...) => runVmSuccess = %v", tx.GetPayload().TxId, runVmSuccess)
 	})
 
-
+	// Apply failed means this tx's read set conflict with other txs' write set
 	// WJY: 调用 ApplyTxSimContext 方法尝试将交易应用到 snapshot 中。
 	// WJY: applyResult 表示是否成功应用，applySize 表示当前快照中已应用的交易数量。
 	// WJY: 如果应用失败，说明该交易的读写集与其他交易发生冲突
@@ -406,9 +436,173 @@ func handleTx(block *commonPb.Block, snapshot protocol.Snapshot,
 		if enableConflictsBitWindow {
 			ts.adjustPoolSize(goRoutinePool, conflictsBitWindow, ConflictTx)
 		}
-		//wzy 提交失败，在此处对失败的交易进行读写集分析，经过重新排序后再加入runningTxC而非原始顺序加入
+		// wzy
+		// 提交失败，收集失败的交易进行读写集分析
+		if enableDAGPartial {
+			txRWSet := txSimContext.GetTxRWSet(runVmSuccess)
+			tx := txSimContext.GetTx()
+			if txRWSet == nil {
+				ts.log.Warnf("tx rwset is nil for tx id:%s, should not happen", tx.Payload.GetTxId())
+				return
+			}
+			failTxWithRwsetC <- &commonPb.TransactionWithRWSet{
+				Transaction: tx,
+				RwSet:       txRWSet,
+			}
+		} else {
+			runningTxC <- tx
+		}
+		ts.log.DebugDynamic(func() string {
+			return fmt.Sprintf("apply to snapshot failed, tx id:%s, result:%+v, apply count:%d",
+				tx.Payload.GetTxId(), txSimContext.GetTxResult(), applySize)
+		})
+		return
+	} else {
 
-		runningTxC <- tx
+		ts.handleApplyResult(enableConflictsBitWindow, enableSenderGroup,
+			conflictsBitWindow, senderGroup, goRoutinePool, tx, start)
+
+		//wzy向通道发送txid和时间cost
+		if ts.txTimeCostChan != nil {
+			ts.txTimeCostChan <- txIdwithTime{
+				txId:     tx.Payload.GetTxId(),
+				costTime: uint64(costTime),
+			}
+		}
+		//wzy最后一笔未处理的交易可能最终成功提交，因此对于成功提交的交易同样需要检测成功与失败交易的数量是否等于总tx数，通过channel返回触发检测
+		if enableDAGPartial {
+			failTxWithRwsetC <- nil
+		}
+
+		ts.log.DebugDynamic(func() string {
+			return fmt.Sprintf("apply to snapshot success, tx id:%s, result:%+v, apply count:%d",
+				tx.Payload.GetTxId(), txSimContext.GetTxResult(), applySize)
+		})
+	}
+
+	// If all transactions have been successfully added to dag
+	if applySize >= txBatchSize {
+		finishC <- true
+	}
+
+}
+
+// wzy处理失败交易进行重排序加入队列
+func (ts *TxScheduler) startFailTxHandler(txRWSet []*commonPb.TxRWSet, txSet []*commonPb.Transaction,
+	block *commonPb.Block, snapshot protocol.Snapshot, goRoutinePool *ants.Pool, parallelTxsNum int, finishC chan bool, timeoutC <-chan time.Time,
+	enableConflictsBitWindow bool, conflictsBitWindow *ConflictsBitWindow,
+	enableSenderGroup bool, senderGroup *SenderGroup, senderCollection *SenderCollection) {
+	dag := snapshot.BuildDAG(ts.chainConf.ChainConfig().Contract.EnableSqlSupport, txRWSet)
+	ts.log.Infof("start handle fail tx, dag : %v", dag)
+
+	txIndexBatch, dagRemain, reverseDagRemain, err := ts.initSimulateDag(dag)
+	txBatchSize := len(dag.Vertexes)
+	runningTxC := make(chan int, txBatchSize)
+	doneTxC := make(chan *applyResult, txBatchSize)
+	var redoApplyCount = 0
+	goRoutinePool, _ = ants.NewPool(ts.StoreHelper.GetPoolCapacity(), ants.WithPreAlloc(false))
+
+	go func() {
+		for _, tx := range txIndexBatch {
+			runningTxC <- tx
+		}
+	}()
+	go func() {
+		for {
+			select {
+			case txIndex := <-runningTxC:
+				tx := txSet[txIndex]
+				ts.log.Debugf("redo with dag, prepare to submit running task for tx[%+v] id:%s", txIndex,
+					tx.Payload.GetTxId())
+				err = goRoutinePool.Submit(func() {
+					handleFailTx(
+						block, snapshot, ts, tx, runningTxC, doneTxC, finishC, goRoutinePool, parallelTxsNum, txIndex,
+						enableConflictsBitWindow, conflictsBitWindow, enableSenderGroup, senderGroup, senderCollection)
+				})
+				if err != nil {
+					ts.log.Warnf("failed to submit tx id %s redo with dag, %+v",
+						tx.Payload.GetTxId(), err)
+				}
+			case txApplyResult := <-doneTxC:
+				if !txApplyResult.isApplySuccess {
+					redoApplyCount++
+				}
+				txIndexBatchAfterShrink := ts.shrinkDag(txApplyResult.txIndex, dagRemain, reverseDagRemain)
+				ts.log.Debugf("submit fail tx in block [%d], pop next tx index batch size:%d, dagRemain size:%d",
+					block.Header.BlockHeight, len(txIndexBatchAfterShrink), len(dagRemain))
+				for _, tx := range txIndexBatchAfterShrink {
+					runningTxC <- tx
+				}
+				// if txApplyResult.applySize >= parallelTxsNum {
+				// 	ts.log.Infof("block [%d] execute with redo tx dag success, apply size:%d", txApplyResult.applySize)
+				// 	finishC <- true
+				// 	return
+				// }
+				// case <-finishC:
+				// 	ts.log.Infof("block [%d] execute with redo tx dag finish", block.Header.BlockHeight)
+				// 	ts.log.Info("schedule finish signal 5")
+				// 	//ts.scheduleFinishC <- true
+				// 	return
+				// case <-timeoutC:
+				// 	ts.log.Errorf("block [%d] execute with fail tx dag timeout", block.Header.BlockHeight)
+				// 	return
+			}
+
+		}
+	}()
+
+}
+
+// 根据dag执行
+func handleFailTx(block *commonPb.Block, snapshot protocol.Snapshot,
+	ts *TxScheduler, tx *commonPb.Transaction,
+	runningTxC chan int, doneTxC chan *applyResult, finishC chan bool,
+	goRoutinePool *ants.Pool, parallelTxsNum int, txIndex int,
+	enableConflictsBitWindow bool, conflictsBitWindow *ConflictsBitWindow,
+	enableSenderGroup bool, senderGroup *SenderGroup, senderCollection *SenderCollection) {
+
+	// If snapshot is sealed, no more transaction will be added into snapshot
+	if snapshot.IsSealed() {
+		ts.log.DebugDynamic(func() string {
+			return fmt.Sprintf("handleTx(`%v`) snapshot has already sealed.", tx.GetPayload().TxId)
+		})
+		return
+	}
+	var start time.Time
+	//wzy
+
+	enableDAGPartial := true //ts.chainConf.ChainConfig().Core.EnableDAGpartial
+	if localconf.ChainMakerConfig.MonitorConfig.Enabled || enableDAGPartial {
+		start = time.Now()
+	}
+
+	// execute tx, and get
+	// 1) the read/write set
+	// 2) the result that telling if the invoke success.
+	txSimContext, specialTxType, runVmSuccess := ts.executeTx(tx, snapshot, block, senderCollection)
+	costTime := time.Since(start)
+	tx.Result = txSimContext.GetTxResult()
+	ts.log.DebugDynamic(func() string {
+		return fmt.Sprintf("handleTx(`%v`) => executeTx(...) => runVmSuccess = %v", tx.GetPayload().TxId, runVmSuccess)
+	})
+
+	// Apply failed means this tx's read set conflict with other txs' write set
+	isApplySuccess, applySize := snapshot.ApplyTxSimContext(txSimContext, specialTxType,
+		runVmSuccess, false, ts.switchController)
+	ts.log.DebugDynamic(func() string {
+		return fmt.Sprintf("handleTx(`%v`) => ApplyTxSimContext(...) => snapshot.txTable = %v, applySize = %v",
+			tx.GetPayload().TxId, len(snapshot.GetTxTable()), applySize)
+	})
+	doneTxC <- &applyResult{txIndex, isApplySuccess, applySize}
+	// reduce the conflictsBitWindow size to eliminate the read/write set conflict
+	if !isApplySuccess {
+		//第一次失败时已经调整过
+		// if enableConflictsBitWindow {
+		// 	ts.adjustPoolSize(goRoutinePool, conflictsBitWindow, ConflictTx)
+		// }
+		// wzy
+		// 提交失败直接重做
+		runningTxC <- txIndex
 
 		ts.log.DebugDynamic(func() string {
 			return fmt.Sprintf("apply to snapshot failed, tx id:%s, result:%+v, apply count:%d",
@@ -436,7 +630,7 @@ func handleTx(block *commonPb.Block, snapshot protocol.Snapshot,
 		})
 	}
 	// If all transactions have been successfully added to dag
-	if applySize >= txBatchSize {
+	if applySize >= parallelTxsNum {
 		finishC <- true
 	}
 }
@@ -541,7 +735,9 @@ func (ts *TxScheduler) SimulateWithDag(block *commonPb.Block, snapshot protocol.
 	defer ts.lock.Unlock()
 
 	defer ts.releaseContractCache()
-
+	strategy, _ := strconv.Atoi(string(block.AdditionalData.ExtraData["TBFTAdditionalDataSchedule"]))
+	ts.switchController.TryEnable(switch_control.ControlType(strategy))
+	ts.log.Infof("ZYF using strategy " + string(int(strategy)) + "!")
 	var (
 		startTime  = time.Now()
 		txRWSetMap = make(map[string]*commonPb.TxRWSet, len(block.Txs))

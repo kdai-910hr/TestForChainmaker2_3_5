@@ -11,12 +11,14 @@ import (
 	"encoding/hex"
 	"fmt"
 	"runtime/debug"
+	"strconv"
 	"sync"
 	"sync/atomic"
 
 	"chainmaker.org/chainmaker-go/module/core/common/coinbasemgr"
 
 	"chainmaker.org/chainmaker-go/module/core/common/scheduler"
+	"chainmaker.org/chainmaker-go/module/core/common/switch_control"
 	"chainmaker.org/chainmaker-go/module/core/provider/conf"
 	"chainmaker.org/chainmaker-go/module/subscriber"
 	"chainmaker.org/chainmaker/common/v2/bytehelper"
@@ -704,6 +706,14 @@ func (vb *VerifierBlock) ValidateBlock(
 		timeLasts[TxRoot] = rootsLast
 		return nil, nil, timeLasts, nil, nil
 	}
+
+	// verify strategy:
+	strategy, _ := strconv.Atoi(string(block.AdditionalData.ExtraData["TBFTAdditionalDataSchedule"]))
+	if switch_control.ControlType(strategy) != switch_control.DeriveAlgorithm(block.Dag) {
+		return nil, nil, timeLasts, nil, fmt.Errorf("ZYF block dag strategy %s not match with consensus strategy %s",
+			switch_control.DeriveAlgorithm(block.Dag), switch_control.ControlType(strategy))
+	}
+
 	// 1. 空交易
 	// 2. recoveryBlock
 	// verify if txs are duplicate in this block
@@ -719,6 +729,7 @@ func (vb *VerifierBlock) ValidateBlock(
 	vb.storeHelper.BeginDbTransaction(snapshot.GetBlockchainStore(), block.GetTxKey())
 
 	startVMTick := utils.CurrentTimeMillisSeconds()
+	vb.log.Infof("ZYF Using Strategy " + strconv.Itoa((int)strategy) + "!")
 	txRWSetMap, txResultMap, err := vb.txScheduler.SimulateWithDag(block, snapshot)
 	vmLasts := utils.CurrentTimeMillisSeconds() - startVMTick
 	vb.log.Infof("Validate block[%v](txs:%v), time used(new snapshot:%v, start DB transaction:%v, vm:%v)",

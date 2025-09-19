@@ -142,11 +142,11 @@ func (s *SwitchControllerImpl) IsEnabled(controlType ControlType) bool {
 	return controlType == DEFAULTControl
 }
 
-func (s *SwitchControllerImpl) TryEnable(controlType ControlType, _value bool) {
+func (s *SwitchControllerImpl) TryEnable(controlType ControlType) {
 	// 原生控制就是所有切换方案都不启用
 	for _type, controller := range s.Controllers {
 		if _type == controlType {
-			controller.TryEnable(_value)
+			controller.TryEnable(true)
 		} else {
 			controller.TryEnable(false) // Disable other controllers
 		}
