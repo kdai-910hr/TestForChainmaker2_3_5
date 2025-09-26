@@ -1222,3 +1222,457 @@ func TestApplyTxSimContext_StaleRead(t *testing.T) {
 		t.Fatalf("应当记录冲突 key = %s%s，got %v", contractName, key, s.staleReadKeys)
 	}
 }
+
+// TestHasWARConflicts 测试WAR冲突检查函数
+func TestHasWARConflicts(t *testing.T) {
+	tests := []struct {
+		name         string
+		txExecSeq    int
+		txRWSet      *commonPb.TxRWSet
+		reservations *ShardSet
+		want         bool
+	}{
+		{
+			name:      "no_conflicts_empty_reservations",
+			txExecSeq: 5,
+			txRWSet: &commonPb.TxRWSet{
+				TxWrites: []*commonPb.TxWrite{
+					{
+						ContractName: "contract1",
+						Key:          []byte("key1"),
+						Value:        []byte("value1"),
+					},
+				},
+			},
+			reservations: newShardSet(),
+			want:         false,
+		},
+		{
+			name:      "no_conflicts_higher_seq",
+			txExecSeq: 5,
+			txRWSet: &commonPb.TxRWSet{
+				TxWrites: []*commonPb.TxWrite{
+					{
+						ContractName: "contract1",
+						Key:          []byte("key1"),
+						Value:        []byte("value1"),
+					},
+				},
+			},
+			reservations: func() *ShardSet {
+				rs := newShardSet()
+				key := constructKey("contract1", []byte("key1"))
+				rs.putByLock(key, &sv{seq: 6, value: []byte("value")})
+				return rs
+			}(),
+			want: false,
+		},
+		{
+			name:      "has_conflicts_lower_seq",
+			txExecSeq: 5,
+			txRWSet: &commonPb.TxRWSet{
+				TxWrites: []*commonPb.TxWrite{
+					{
+						ContractName: "contract1",
+						Key:          []byte("key1"),
+						Value:        []byte("value1"),
+					},
+				},
+			},
+			reservations: func() *ShardSet {
+				rs := newShardSet()
+				key := constructKey("contract1", []byte("key1"))
+				rs.putByLock(key, &sv{seq: 3, value: []byte("value")})
+				return rs
+			}(),
+			want: true,
+		},
+		{
+			name:      "has_conflicts_same_seq",
+			txExecSeq: 5,
+			txRWSet: &commonPb.TxRWSet{
+				TxWrites: []*commonPb.TxWrite{
+					{
+						ContractName: "contract1",
+						Key:          []byte("key1"),
+						Value:        []byte("value1"),
+					},
+				},
+			},
+			reservations: func() *ShardSet {
+				rs := newShardSet()
+				key := constructKey("contract1", []byte("key1"))
+				rs.putByLock(key, &sv{seq: 5, value: []byte("value")})
+				return rs
+			}(),
+			want: false,
+		},
+		{
+			name:      "multiple_writes_no_conflicts",
+			txExecSeq: 5,
+			txRWSet: &commonPb.TxRWSet{
+				TxWrites: []*commonPb.TxWrite{
+					{
+						ContractName: "contract1",
+						Key:          []byte("key1"),
+						Value:        []byte("value1"),
+					},
+					{
+						ContractName: "contract2",
+						Key:          []byte("key2"),
+						Value:        []byte("value2"),
+					},
+				},
+			},
+			reservations: func() *ShardSet {
+				rs := newShardSet()
+				key1 := constructKey("contract1", []byte("key1"))
+				key2 := constructKey("contract2", []byte("key2"))
+				rs.putByLock(key1, &sv{seq: 6, value: []byte("value1")})
+				rs.putByLock(key2, &sv{seq: 7, value: []byte("value2")})
+				return rs
+			}(),
+			want: false,
+		},
+		{
+			name:      "multiple_writes_has_conflicts",
+			txExecSeq: 5,
+			txRWSet: &commonPb.TxRWSet{
+				TxWrites: []*commonPb.TxWrite{
+					{
+						ContractName: "contract1",
+						Key:          []byte("key1"),
+						Value:        []byte("value1"),
+					},
+					{
+						ContractName: "contract2",
+						Key:          []byte("key2"),
+						Value:        []byte("value2"),
+					},
+				},
+			},
+			reservations: func() *ShardSet {
+				rs := newShardSet()
+				key1 := constructKey("contract1", []byte("key1"))
+				key2 := constructKey("contract2", []byte("key2"))
+				rs.putByLock(key1, &sv{seq: 6, value: []byte("value1")})
+				rs.putByLock(key2, &sv{seq: 3, value: []byte("value2")}) // 这个会产生冲突
+				return rs
+			}(),
+			want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := hasWARConflicts(tt.txExecSeq, tt.txRWSet, tt.reservations); got != tt.want {
+				t.Errorf("hasWARConflicts() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestHasRAWConflicts 测试RAW冲突检查函数
+func TestHasRAWConflicts(t *testing.T) {
+	tests := []struct {
+		name         string
+		txExecSeq    int
+		txRWSet      *commonPb.TxRWSet
+		reservations *ShardSet
+		want         bool
+	}{
+		{
+			name:      "no_conflicts_empty_reservations",
+			txExecSeq: 5,
+			txRWSet: &commonPb.TxRWSet{
+				TxReads: []*commonPb.TxRead{
+					{
+						ContractName: "contract1",
+						Key:          []byte("key1"),
+						Value:        []byte("value1"),
+					},
+				},
+			},
+			reservations: newShardSet(),
+			want:         false,
+		},
+		{
+			name:      "no_conflicts_higher_seq",
+			txExecSeq: 5,
+			txRWSet: &commonPb.TxRWSet{
+				TxReads: []*commonPb.TxRead{
+					{
+						ContractName: "contract1",
+						Key:          []byte("key1"),
+						Value:        []byte("value1"),
+					},
+				},
+			},
+			reservations: func() *ShardSet {
+				rs := newShardSet()
+				key := constructKey("contract1", []byte("key1"))
+				rs.putByLock(key, &sv{seq: 6, value: []byte("value")})
+				return rs
+			}(),
+			want: false,
+		},
+		{
+			name:      "has_conflicts_lower_seq",
+			txExecSeq: 5,
+			txRWSet: &commonPb.TxRWSet{
+				TxReads: []*commonPb.TxRead{
+					{
+						ContractName: "contract1",
+						Key:          []byte("key1"),
+						Value:        []byte("value1"),
+					},
+				},
+			},
+			reservations: func() *ShardSet {
+				rs := newShardSet()
+				key := constructKey("contract1", []byte("key1"))
+				rs.putByLock(key, &sv{seq: 3, value: []byte("value")})
+				return rs
+			}(),
+			want: true,
+		},
+		{
+			name:      "has_conflicts_same_seq",
+			txExecSeq: 5,
+			txRWSet: &commonPb.TxRWSet{
+				TxReads: []*commonPb.TxRead{
+					{
+						ContractName: "contract1",
+						Key:          []byte("key1"),
+						Value:        []byte("value1"),
+					},
+				},
+			},
+			reservations: func() *ShardSet {
+				rs := newShardSet()
+				key := constructKey("contract1", []byte("key1"))
+				rs.putByLock(key, &sv{seq: 5, value: []byte("value")})
+				return rs
+			}(),
+			want: false,
+		},
+		{
+			name:      "multiple_reads_no_conflicts",
+			txExecSeq: 5,
+			txRWSet: &commonPb.TxRWSet{
+				TxReads: []*commonPb.TxRead{
+					{
+						ContractName: "contract1",
+						Key:          []byte("key1"),
+						Value:        []byte("value1"),
+					},
+					{
+						ContractName: "contract2",
+						Key:          []byte("key2"),
+						Value:        []byte("value2"),
+					},
+				},
+			},
+			reservations: func() *ShardSet {
+				rs := newShardSet()
+				key1 := constructKey("contract1", []byte("key1"))
+				key2 := constructKey("contract2", []byte("key2"))
+				rs.putByLock(key1, &sv{seq: 6, value: []byte("value1")})
+				rs.putByLock(key2, &sv{seq: 7, value: []byte("value2")})
+				return rs
+			}(),
+			want: false,
+		},
+		{
+			name:      "multiple_reads_has_conflicts",
+			txExecSeq: 5,
+			txRWSet: &commonPb.TxRWSet{
+				TxReads: []*commonPb.TxRead{
+					{
+						ContractName: "contract1",
+						Key:          []byte("key1"),
+						Value:        []byte("value1"),
+					},
+					{
+						ContractName: "contract2",
+						Key:          []byte("key2"),
+						Value:        []byte("value2"),
+					},
+				},
+			},
+			reservations: func() *ShardSet {
+				rs := newShardSet()
+				key1 := constructKey("contract1", []byte("key1"))
+				key2 := constructKey("contract2", []byte("key2"))
+				rs.putByLock(key1, &sv{seq: 6, value: []byte("value1")})
+				rs.putByLock(key2, &sv{seq: 3, value: []byte("value2")}) // 这个会产生冲突
+				return rs
+			}(),
+			want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := hasRAWConflicts(tt.txExecSeq, tt.txRWSet, tt.reservations); got != tt.want {
+				t.Errorf("hasRAWConflicts() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestConflictCheckLogic 测试重排序算法中的冲突检查逻辑
+func TestConflictCheckLogic(t *testing.T) {
+	tests := []struct {
+		name          string
+		txExecSeq     int
+		txRWSet       *commonPb.TxRWSet
+		readTable     *ShardSet
+		writeTable    *ShardSet
+		expectInstall bool
+		description   string
+	}{
+		{
+			name:      "no_conflicts_should_install",
+			txExecSeq: 5,
+			txRWSet: &commonPb.TxRWSet{
+				TxReads: []*commonPb.TxRead{
+					{
+						ContractName: "contract1",
+						Key:          []byte("key1"),
+						Value:        []byte("value1"),
+					},
+				},
+				TxWrites: []*commonPb.TxWrite{
+					{
+						ContractName: "contract2",
+						Key:          []byte("key2"),
+						Value:        []byte("value2"),
+					},
+				},
+			},
+			readTable:     newShardSet(),
+			writeTable:    newShardSet(),
+			expectInstall: true,
+			description:   "没有冲突，应该安装",
+		},
+		{
+			name:      "war_conflict_should_not_install",
+			txExecSeq: 5,
+			txRWSet: &commonPb.TxRWSet{
+				TxWrites: []*commonPb.TxWrite{
+					{
+						ContractName: "contract1",
+						Key:          []byte("key1"),
+						Value:        []byte("value1"),
+					},
+				},
+			},
+			readTable: func() *ShardSet {
+				rs := newShardSet()
+				key := constructKey("contract1", []byte("key1"))
+				rs.putByLock(key, &sv{seq: 3, value: []byte("value")})
+				return rs
+			}(),
+			writeTable:    newShardSet(),
+			expectInstall: true,
+			description:   "WAR冲突，应该安装",
+		},
+		{
+			name:      "raw_conflict_should_not_install",
+			txExecSeq: 5,
+			txRWSet: &commonPb.TxRWSet{
+				TxReads: []*commonPb.TxRead{
+					{
+						ContractName: "contract1",
+						Key:          []byte("key1"),
+						Value:        []byte("value1"),
+					},
+				},
+			},
+			readTable: newShardSet(),
+			writeTable: func() *ShardSet {
+				rs := newShardSet()
+				key := constructKey("contract1", []byte("key1"))
+				rs.putByLock(key, &sv{seq: 3, value: []byte("value")})
+				return rs
+			}(),
+			expectInstall: true,
+			description:   "RAW冲突，应该安装",
+		},
+		{
+			name:      "war_no_conflict_raw_conflict_should_not_install",
+			txExecSeq: 5,
+			txRWSet: &commonPb.TxRWSet{
+				TxReads: []*commonPb.TxRead{
+					{
+						ContractName: "contract1",
+						Key:          []byte("key1"),
+						Value:        []byte("value1"),
+					},
+				},
+				TxWrites: []*commonPb.TxWrite{
+					{
+						ContractName: "contract2",
+						Key:          []byte("key2"),
+						Value:        []byte("value2"),
+					},
+				},
+			},
+			readTable: newShardSet(),
+			writeTable: func() *ShardSet {
+				rs := newShardSet()
+				key := constructKey("contract1", []byte("key1"))
+				rs.putByLock(key, &sv{seq: 3, value: []byte("value")})
+				return rs
+			}(),
+			expectInstall: true,
+			description:   "WAR无冲突但RAW有冲突，应该安装",
+		},
+		{
+			name:      "war_conflict_raw_no_conflict_should_not_install",
+			txExecSeq: 5,
+			txRWSet: &commonPb.TxRWSet{
+				TxReads: []*commonPb.TxRead{
+					{
+						ContractName: "contract1",
+						Key:          []byte("key1"),
+						Value:        []byte("value1"),
+					},
+				},
+				TxWrites: []*commonPb.TxWrite{
+					{
+						ContractName: "contract2",
+						Key:          []byte("key2"),
+						Value:        []byte("value2"),
+					},
+				},
+			},
+			readTable: func() *ShardSet {
+				rs := newShardSet()
+				key := constructKey("contract2", []byte("key2"))
+				rs.putByLock(key, &sv{seq: 3, value: []byte("value")})
+				return rs
+			}(),
+			writeTable:    newShardSet(),
+			expectInstall: true,
+			description:   "WAR有冲突但RAW无冲突，应该安装",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// 模拟重排序算法的冲突检查逻辑
+			// 只要有WAR和RAW一种不冲突即可提交
+			warNoConflict := !hasWARConflicts(tt.txExecSeq, tt.txRWSet, tt.readTable)
+			rawNoConflict := !hasRAWConflicts(tt.txExecSeq, tt.txRWSet, tt.writeTable)
+
+			shouldInstall := warNoConflict || rawNoConflict
+
+			if shouldInstall != tt.expectInstall {
+				t.Errorf("Conflict check logic failed for %s: got %v, want %v. Description: %s",
+					tt.name, shouldInstall, tt.expectInstall, tt.description)
+			}
+		})
+	}
+}

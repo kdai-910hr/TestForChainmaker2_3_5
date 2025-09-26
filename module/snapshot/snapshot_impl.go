@@ -518,7 +518,7 @@ func (s *SnapshotImpl) ApplyTxSimContext(txSimContext protocol.TxSimContext, spe
 					s.AddStaleReadKey(finalKey)
 					return false, s.GetSnapshotSize() + len(s.specialTxTable)
 				}
-			} else if enableBatch && sv.seq < txExecSeq || !enableBatch && sv.seq >= txExecSeq {
+			} else if enableBatch && sv.seq >= txExecSeq {
 				s.log.Debugf("Key Conflicted %+v-%+v, tx id:%s", sv.seq, txExecSeq, tx.Payload.TxId)
 				return false, s.GetSnapshotSize() + len(s.specialTxTable)
 			}
