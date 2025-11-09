@@ -2,9 +2,6 @@ package switch_control
 
 import (
 	"math"
-	"runtime"
-	"sync"
-	"sync/atomic"
 
 	commonPb "chainmaker.org/chainmaker/pb-go/v2/common"
 )
@@ -49,73 +46,48 @@ func ExtractDAGFeaturesParallel(dag *commonPb.DAG) []float64 {
 		return nil
 	}
 
-	// 初始化入度（原子类型，避免跨分片竞争）、出度（无竞争）
-	inDegree := make([]atomic.Int32, numVertices)
+	// 改为顺序计算以确保确定性
+	inDegree := make([]int, numVertices)
 	outDegree := make([]int, numVertices)
-	var edgesAtomic atomic.Int32 // 总边数
+	numEdges := 0
 
-	// 并行任务1：计算出度和总边数
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		localEdges := 0
-		for i, v := range vertexes {
-			outDeg := len(v.Neighbors)
-			outDegree[i] = outDeg
-			localEdges += outDeg
-		}
-		edgesAtomic.Add(int32(localEdges))
-	}()
-
-	// 并行任务2：分片计算入度
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		shardSize := (int(numVertices) + runtime.NumCPU() - 1) / runtime.NumCPU()
-		var shardWg sync.WaitGroup
-		for s := 0; s < runtime.NumCPU(); s++ {
-			start, end := s*shardSize, (s+1)*shardSize
-			if end > numVertices {
-				end = numVertices
+	// 顺序计算出度和入度
+	for i, v := range vertexes {
+		outDeg := len(v.Neighbors)
+		outDegree[i] = outDeg
+		numEdges += outDeg
+		
+		for _, neighborIdx := range v.Neighbors {
+			if neighborIdx >= 0 && int(neighborIdx) < numVertices {
+				inDegree[neighborIdx]++
 			}
-			shardWg.Add(1)
-			go func(s, e int) {
-				defer shardWg.Done()
-				for i := s; i < e; i++ {
-					for _, neighborIdx := range vertexes[i].Neighbors {
-						if neighborIdx >= 0 && int(neighborIdx) < numVertices {
-							inDegree[neighborIdx].Add(1) // 原子累加入度
-						}
-					}
-				}
-			}(start, end)
 		}
-		shardWg.Wait()
-	}()
-
-	wg.Wait()
-	numEdges := int(edgesAtomic.Load())
+	}
 
 	// 计算最终特征（顺序严格匹配ModelParams）
 	features := make([]float64, 9)
 	features[0] = float64(numVertices) // num_vertices
 	features[1] = float64(numEdges)    // num_edges
+	
+	// 计算图密度
 	if numVertices > 1 {
 		features[2] = float64(numEdges) / (float64(numVertices) * float64(numVertices-1)) // density
+	} else {
+		features[2] = 0.0
 	}
-	// 计算平均入度、最大入度
+	
+	// 计算入度统计
 	sumIn, maxIn := 0, 0
 	for _, d := range inDegree {
-		val := int(d.Load())
-		sumIn += val
-		if val > maxIn {
-			maxIn = val
+		sumIn += d
+		if d > maxIn {
+			maxIn = d
 		}
 	}
 	features[3] = float64(sumIn) / float64(numVertices) // avg_in_degree
 	features[5] = float64(maxIn)                        // max_in_degree
-	// 计算平均出度、最大出度
+	
+	// 计算出度统计
 	sumOut, maxOut := 0, 0
 	for _, d := range outDegree {
 		sumOut += d
@@ -125,6 +97,8 @@ func ExtractDAGFeaturesParallel(dag *commonPb.DAG) []float64 {
 	}
 	features[4] = float64(sumOut) / float64(numVertices) // avg_out_degree
 	features[6] = float64(maxOut)                        // max_out_degree
+	
+	// 这两个特征在当前模型中均为0
 	features[7], features[8] = 0.0, 0.0
 
 	return features

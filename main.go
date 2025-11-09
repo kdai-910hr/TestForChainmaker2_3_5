@@ -101,11 +101,9 @@ func main() {
 				if s.CommonTxNumInQueue+s.CommonTxNumInPending == 0 {
 					break
 				}
-				time.Sleep(time.Duration(batchInterval) * time.Second)
+				time.Sleep(5 * time.Second)
 			}
 		}
-		height := getHeight(client)
-                heights = append(heights, height)
 		// 输出所有收集到的高度值
 		fmt.Println("All heights:", heights)
 	

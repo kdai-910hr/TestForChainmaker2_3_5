@@ -224,14 +224,15 @@ func (s *SnapshotImpl) GetKey(txExecSeq int, contractName string, key []byte) ([
 	if s.AUXRwMap != nil && txExecSeq != -1 {
 		if AUXRwSlice, ok := s.AUXRwMap[finalKey]; ok {
 			//遍历该key的所有写版本，找到小于txExecSeq的最新版本
-			result := -1
+			resultIndex := -1
 			for i, sv := range AUXRwSlice {
-				if sv.seq < txExecSeq && sv.seq > result {
-					result = i
+				if sv.seq < txExecSeq {
+					resultIndex = i
 				}
 			}
-			if result != -1 {
-				return AUXRwSlice[result].value, nil
+			if resultIndex != -1 {
+				s.log.Debug("txseq is", txExecSeq, "read key:", finalKey, " is ", AUXRwSlice[resultIndex], "index is", resultIndex, "AUXRwSlice is", AUXRwSlice)
+				return AUXRwSlice[resultIndex].value, nil
 			}
 		}
 	}
@@ -453,7 +454,7 @@ func (s *SnapshotImpl) ApplyTxSimContext(txSimContext protocol.TxSimContext, spe
 		for _, txWrite := range txRWSet.TxWrites {
 			finalKey := constructKey(txWrite.ContractName, txWrite.Key)
 			if sv, ok := s.writeTable.getByLock(finalKey); ok {
-				if sv.seq < txExecSeq {
+				if sv.seq >= txExecSeq {
 					fmt.Println("存在WAW冲突")
 					s.log.Debugf("Key Conflicted %+v-%+v, tx id:%s", sv.seq, txExecSeq, tx.Payload.TxId)
 					return false, len(s.txTable) + len(s.specialTxTable)
@@ -517,7 +518,7 @@ func (s *SnapshotImpl) ApplyTxSimContext(txSimContext protocol.TxSimContext, spe
 					s.AddStaleReadKey(finalKey)
 					return false, s.GetSnapshotSize() + len(s.specialTxTable)
 				}
-			} else if enableBatch && sv.seq < txExecSeq || !enableBatch && sv.seq >= txExecSeq {
+			} else if enableBatch && sv.seq >= txExecSeq {
 				s.log.Debugf("Key Conflicted %+v-%+v, tx id:%s", sv.seq, txExecSeq, tx.Payload.TxId)
 				return false, s.GetSnapshotSize() + len(s.specialTxTable)
 			}
@@ -583,13 +584,15 @@ func (s *SnapshotImpl) applyTxSimContextWithOrder(txSimContext protocol.TxSimCon
 				value: txWrite.Value,
 			}
 		} else { //如果key存在于AUXRwMap中
-			index := 0
+			resultIndex := 0
 			for i, sv := range AUXRw {
 				if sv.seq < txExecSeq {
-					index = i
+					s.log.Debug("txseq is ", txExecSeq, "find sv", i, sv)
+					resultIndex = i
 				}
 			}
-			AUXRw[index] = sv{seq: txExecSeq, value: txWrite.Value}
+			AUXRw[resultIndex] = sv{seq: txExecSeq, value: txWrite.Value}
+			s.log.Debug("txseq is", txExecSeq, "write key:", finalKey, " is ", AUXRw[resultIndex], "index is", resultIndex, "AUXRwSlice is", AUXRw)
 		}
 	}
 
@@ -1044,15 +1047,17 @@ func (s *SnapshotImpl) getBatchFromAUXRwMap(keys []*vmPb.BatchKey, txExecSeq int
 	for _, key := range keys {
 		finalKey := constructKey(key.ContractName, protocol.GetKeyStr(key.Key, key.Field))
 		if AUXRwSlice, ok := s.AUXRwMap[finalKey]; ok {
-			//遍历该key的所有写版本，找到小于txExecSeq的最新版本
-			result := -1
+			//wzy遍历该key的所有写版本，找到小于txExecSeq的最新版本
+			//s.log.Warn("txseq is ", txExecSeq, "read key :" , finalKey, "AUXRwSlice is", AUXRwSlice)
+			resultIndex := -1 //结果下标
 			for i, sv := range AUXRwSlice {
-				if sv.seq < txExecSeq && sv.seq > result {
-					result = i
+				if sv.seq < txExecSeq {
+					resultIndex = i
 				}
 			}
-			if result != -1 {
-				key.Value = AUXRwSlice[result].value
+			if resultIndex != -1 {
+				s.log.Debug("txseq is", txExecSeq, "read key:", finalKey, " is ", AUXRwSlice[resultIndex], "resultIndex is", resultIndex, "AUXRwSlice is", AUXRwSlice)
+				key.Value = AUXRwSlice[resultIndex].value
 				txWrites = append(txWrites, key)
 			} else {
 				emptyTxWrite = append(emptyTxWrite, key)

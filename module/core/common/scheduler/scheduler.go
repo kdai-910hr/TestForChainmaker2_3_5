@@ -737,7 +737,7 @@ func (ts *TxScheduler) SimulateWithDag(block *commonPb.Block, snapshot protocol.
 	defer ts.releaseContractCache()
 	strategy, _ := strconv.Atoi(string(block.AdditionalData.ExtraData["TBFTAdditionalDataSchedule"]))
 	ts.switchController.TryEnable(switch_control.ControlType(strategy))
-	ts.log.Infof("ZYF using strategy " + string(int(strategy)) + "!")
+	ts.log.Infof("ZYF using strategy " + strconv.Itoa(int(strategy)) + "!")
 	var (
 		startTime  = time.Now()
 		txRWSetMap = make(map[string]*commonPb.TxRWSet, len(block.Txs))
@@ -761,6 +761,9 @@ func (ts *TxScheduler) SimulateWithDag(block *commonPb.Block, snapshot protocol.
 	}
 
 	// Construct the adjacency list of dag, which describes the subsequent adjacency transactions of all transactions
+	if strategy == 2 {
+		ts.cutDAG(block)
+	}
 	dag := block.Dag
 	txIndexBatch, dagRemain, reverseDagRemain, err := ts.initSimulateDag(dag)
 	if err != nil {
@@ -2470,6 +2473,44 @@ func (ts *TxScheduler) partDAG(block *commonPb.Block, rwSetMap map[string]*commo
 	}
 	ts.log.Debugf("AUXRwMap is : %+v", AUXRwMap)
 	//修改根据割边集合修改dag
+	//9.28不再切割原始dag，将cutedge信息打包
+	cutEdgeSetBytes, _ := json.Marshal(cutEdgeSet)
+	cutEdgeSetSizeBytes, _ := json.Marshal(len(cutEdgeSet))
+	block.AdditionalData.ExtraData["cutEdgeSetSize"] = cutEdgeSetSizeBytes
+	block.AdditionalData.ExtraData["cutEdgeSet"] = cutEdgeSetBytes
+	// for _, edge := range cutEdgeSet {
+	// 	//数组删除代价大，就用修改依赖值为txCount+1表示删除，后续simulate时也是先转换成map再模拟拓扑排序执行，在转换map时过滤掉依赖于自己的边即可
+	// 	for i, from := range block.Dag.Vertexes[edge.To].Neighbors {
+	// 		if from == edge.From {
+	// 			block.Dag.Vertexes[edge.To].Neighbors[i] = uint32(txCount) + 1
+	// 			break
+	// 		}
+	// 	}
+	// }
+	// //整理割边集合
+	// cutEdgeMap := make(map[uint32][]uint32)
+	// for _, edge := range cutEdgeSet {
+	// 	cutEdgeMap[edge.From] = append(cutEdgeMap[edge.From], edge.To)
+	// }
+	return AUXRwMap
+
+}
+
+// 9.28新增切割dag函数
+func (ts *TxScheduler) cutDAG(block *commonPb.Block) {
+	txCount := block.Header.TxCount
+	var size int
+	err := json.Unmarshal(block.AdditionalData.ExtraData["cutEdgeSetSize"], &size)
+	if err != nil {
+		ts.log.Errorf("Unmarshal cutEdgeSetSize Error %+v", err)
+		return
+	}
+	cutEdgeSet := make([]Edge, size)
+	err = json.Unmarshal(block.AdditionalData.ExtraData["cutEdgeSet"], &cutEdgeSet)
+	if err != nil {
+		ts.log.Errorf("Unmarshal cutEdgeSet Error %+v", err)
+		return
+	}
 	for _, edge := range cutEdgeSet {
 		//数组删除代价大，就用修改依赖值为txCount+1表示删除，后续simulate时也是先转换成map再模拟拓扑排序执行，在转换map时过滤掉依赖于自己的边即可
 		for i, from := range block.Dag.Vertexes[edge.To].Neighbors {
@@ -2479,11 +2520,5 @@ func (ts *TxScheduler) partDAG(block *commonPb.Block, rwSetMap map[string]*commo
 			}
 		}
 	}
-	// //整理割边集合
-	// cutEdgeMap := make(map[uint32][]uint32)
-	// for _, edge := range cutEdgeSet {
-	// 	cutEdgeMap[edge.From] = append(cutEdgeMap[edge.From], edge.To)
-	// }
-	return AUXRwMap
-
 }
+
