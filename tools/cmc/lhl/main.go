@@ -20,8 +20,7 @@ const (
 	createContractTimeout = 10000
 	claimVersion          = "1.0.0"
 	claimByteCodePath     = "bank.7z"
-	//sdkConfPath           = "sdk_config.yml"
-	sdkConfPath           = "/root/finalChain/tools/cmc/testdata/sdk_config.yml"
+	sdkConfPath           = "sdk_config.yml"
 	TxFileName            = "tx.json"
 )
 
@@ -85,9 +84,9 @@ func main() {
 	case "ship":
 		bankContractName = "ship"
 		batchInterval, _ := strconv.Atoi(os.Args[3])
-		DataSkew = 0.0
+		DataSkew = 1.3
 		heights := make([]int, 0, 16) // 创建一个切片来存储每次循环的高度
-		for i := 0; i <= 15; i++ {
+		for i := 0; i <= 2; i++ {
 			height := getHeight(client)
 			heights = append(heights, height) // 将高度添加到切片中
 			fmt.Println(height)
@@ -101,14 +100,13 @@ func main() {
 				if s.CommonTxNumInQueue+s.CommonTxNumInPending == 0 {
 					break
 				}
-				time.Sleep(time.Duration(batchInterval) * time.Second)
+				time.Sleep(5 * time.Second)
 			}
 		}
-		height := getHeight(client)
-                heights = append(heights, height)
 		// 输出所有收集到的高度值
 		fmt.Println("All heights:", heights)
-	
+	case "line":
+		lineTx(client)
 	}
 }
 
