@@ -761,10 +761,12 @@ func (ts *TxScheduler) SimulateWithDag(block *commonPb.Block, snapshot protocol.
 	}
 
 	// Construct the adjacency list of dag, which describes the subsequent adjacency transactions of all transactions
-	if strategy == 2 {
-		ts.cutDAG(block)
-	}
 	dag := block.Dag
+	if strategy == 2 {
+		if _dag := ts.cutDAG(block); _dag != nil {
+			dag = _dag
+		}
+	}
 	txIndexBatch, dagRemain, reverseDagRemain, err := ts.initSimulateDag(dag)
 	if err != nil {
 		ts.log.Warnf("initialize simulate dag error:%s", err)
@@ -2428,8 +2430,8 @@ func (ts *TxScheduler) partDAG(block *commonPb.Block, rwSetMap map[string]*commo
 		}
 
 	}
-	ts.log.Info("subDag set is : %+v", subDAGSet)
-	ts.log.Debugf("cutEdgeSet is : %+v", cutEdgeSet)
+	ts.log.Info("subDag set is:", subDAGSet)
+	ts.log.Info("cutEdgeSet is:", cutEdgeSet)
 	//处理未加入的tx
 	for index := range isVisit {
 		if !isVisit[index] {
@@ -2471,7 +2473,7 @@ func (ts *TxScheduler) partDAG(block *commonPb.Block, rwSetMap map[string]*commo
 		})
 		AUXRwMap[key] = slice
 	}
-	ts.log.Debugf("AUXRwMap is : %+v", AUXRwMap)
+	ts.log.Info("AUXRwMap is :", AUXRwMap)
 	//修改根据割边集合修改dag
 	//9.28不再切割原始dag，将cutedge信息打包
 	cutEdgeSetBytes, _ := json.Marshal(cutEdgeSet)
@@ -2497,28 +2499,33 @@ func (ts *TxScheduler) partDAG(block *commonPb.Block, rwSetMap map[string]*commo
 }
 
 // 9.28新增切割dag函数
-func (ts *TxScheduler) cutDAG(block *commonPb.Block) {
+func (ts *TxScheduler) cutDAG(block *commonPb.Block) *commonPb.DAG {
 	txCount := block.Header.TxCount
-	var size int
-	err := json.Unmarshal(block.AdditionalData.ExtraData["cutEdgeSetSize"], &size)
-	if err != nil {
-		ts.log.Errorf("Unmarshal cutEdgeSetSize Error %+v", err)
-		return
-	}
-	cutEdgeSet := make([]Edge, size)
-	err = json.Unmarshal(block.AdditionalData.ExtraData["cutEdgeSet"], &cutEdgeSet)
+	var cutEdgeSet []Edge
+	err := json.Unmarshal(block.AdditionalData.ExtraData["cutEdgeSet"], &cutEdgeSet)
 	if err != nil {
 		ts.log.Errorf("Unmarshal cutEdgeSet Error %+v", err)
-		return
+		return nil
 	}
+	dag := &commonPb.DAG{}
+	dag.Vertexes = make([]*commonPb.DAG_Neighbor, txCount)
+
+	for i, vertex := range block.Dag.Vertexes {
+		dag.Vertexes[i] = &commonPb.DAG_Neighbor{
+			Neighbors: make([]uint32,len(vertex.Neighbors)),
+		}
+		copy(dag.Vertexes[i].Neighbors, vertex.Neighbors)
+	}
+
 	for _, edge := range cutEdgeSet {
 		//数组删除代价大，就用修改依赖值为txCount+1表示删除，后续simulate时也是先转换成map再模拟拓扑排序执行，在转换map时过滤掉依赖于自己的边即可
-		for i, from := range block.Dag.Vertexes[edge.To].Neighbors {
+		for i, from := range dag.Vertexes[edge.To].Neighbors {
 			if from == edge.From {
-				block.Dag.Vertexes[edge.To].Neighbors[i] = uint32(txCount) + 1
+				dag.Vertexes[edge.To].Neighbors[i] = uint32(txCount) + 1
 				break
 			}
 		}
 	}
-}
 
+	return dag
+}
