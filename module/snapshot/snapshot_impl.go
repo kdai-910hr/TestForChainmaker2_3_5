@@ -32,6 +32,13 @@ type sv struct {
 	value []byte
 }
 
+type readEntry struct {
+	contractName string
+	rawKey       []byte
+	value        []byte
+}
+
+
 type SnapshotImpl struct {
 	lock            sync.RWMutex
 	tableLock       sync.RWMutex
@@ -422,10 +429,24 @@ func (s *SnapshotImpl) ApplyTxSimContext(txSimContext protocol.TxSimContext, spe
 	txResult = txSimContext.GetTxResult()
 	// 实现准备好要处理的数据
 	finalReadKvs := make(map[string]*sv, len(txRWSet.TxReads))
+	var finalReads []readEntry
 	if !enableBatch {
 		for _, txRead := range txRWSet.TxReads {
 			finalKey := constructKey(txRead.ContractName, txRead.Key)
 			// 乐观检查，便于提前发现冲突
+			if enableStale {
+				currentValue, err := s.GetKey(txExecSeq, txRead.ContractName, txRead.Key)
+				if err != nil {
+					s.log.Warnf("failed getKey for stale-read check [%s]: %v", finalKey, err)
+					return false, s.GetSnapshotSize()
+				}
+				if !bytes.Equal(currentValue, txRead.Value) {
+					s.log.Warnf("StaleRead detected early on key %s: vmRead=%x, snapshot=%x",
+						finalKey, txRead.Value, currentValue)
+					txSimContext.SetStaleRead(finalKey) // 记录下哪个 key 冲突
+					return false, s.GetSnapshotSize()
+				}
+			}
 			if sv, ok := s.writeTable.getByLock(finalKey); ok {
 				// WJY: 对于 txRWSet.TxReads 中的每一个读操作
 				// WJY: 若存在相同键且执行序列更高的写操作，则发生冲突，返回 false
@@ -443,6 +464,11 @@ func (s *SnapshotImpl) ApplyTxSimContext(txSimContext protocol.TxSimContext, spe
 			finalReadKvs[finalKey] = &sv{
 				value: txRead.Value,
 			}
+			finalReads = append(finalReads, readEntry{
+				contractName: txRead.ContractName,
+				rawKey:       txRead.Key,
+				value:        txRead.Value,
+			})
 		}
 	}
 	finalWriteKvs := make(map[string]*sv, len(txRWSet.TxWrites))
@@ -506,19 +532,33 @@ func (s *SnapshotImpl) ApplyTxSimContext(txSimContext protocol.TxSimContext, spe
 	// Double-Check
 	// Check whether the dependent state has been modified during the running it
 	start := time.Now()
-	for finalKey := range finalReadKvs {
+	if enableStale {
+		for _, entry := range finalReads {
+			// —— Stale Read 再次检测 ——
+			currentValue, err := s.GetKey(
+				txExecSeq,
+				entry.contractName,
+				entry.rawKey,
+			)
+			if err != nil {
+				s.log.Warnf("double-check getKey failed: %v", err)
+				return false, s.GetSnapshotSize()
+			}
+			if !bytes.Equal(currentValue, entry.value) {
+				s.log.Warnf("StaleRead detected in double-check on key %s", entry.contractName)
+				// 统一使用 constructKey 保证格式一致
+				txSimContext.SetStaleRead(constructKey(entry.contractName, entry.rawKey)) // 你可以传 entry.contractName+":"+string(entry.rawKey) */)
+				return false, s.GetSnapshotSize()
+			}
+			composite := constructKey(entry.contractName, entry.rawKey)
+			if sv, ok := s.writeTable.getByLock(composite); ok && sv.seq >= txExecSeq {
+				return false, s.GetSnapshotSize() + len(s.specialTxTable)
+			}
+		}
+	} else {
+		for finalKey := range finalReadKvs {
 		if sv, ok := s.writeTable.getByLock(finalKey); ok {
-			// WJY: 遍历 finalReadKvs 中的每个键，检查是否已被 writeTable 中的更新覆盖。
-			// WJY: 如果有冲突，则返回 false
-			if enableStale {
-				if sv.seq >= txExecSeq {
-					s.log.Debugf("Key Conflicted %+v-%+v, tx id:%s", sv.seq, txExecSeq, tx.Payload.TxId)
-					s.log.Warnf("⚠️ [%s] Detected Stale Read Key: %s", txSimContext.GetTx().Payload.TxId, finalKey)
-					// 记录发生 Stale Read 的 key
-					s.AddStaleReadKey(finalKey)
-					return false, s.GetSnapshotSize() + len(s.specialTxTable)
-				}
-			} else if enableBatch && sv.seq >= txExecSeq {
+			if sv.seq >= txExecSeq {
 				s.log.Debugf("Key Conflicted %+v-%+v, tx id:%s", sv.seq, txExecSeq, tx.Payload.TxId)
 				return false, s.GetSnapshotSize() + len(s.specialTxTable)
 			}

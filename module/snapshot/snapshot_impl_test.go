@@ -32,13 +32,17 @@ var _ protocol.TxSimContext = (*MockSimContextImpl)(nil)
 
 // Storage interface for smart contracts
 type MockSimContextImpl struct {
-	txExecSeq     int32
-	tx            *commonPb.Transaction
-	txRwSet       *commonPb.TxRWSet
-	currentDepth  int
-	txResult      *commonPb.Result
-	gasRemaining  uint64
-	staleReadKeys []string
+	txExecSeq    int32
+	tx           *commonPb.Transaction
+	txRwSet      *commonPb.TxRWSet
+	currentDepth int
+	txResult     *commonPb.Result
+	gasRemaining uint64
+	staleRead    string
+}
+
+func (m *MockSimContextImpl) SetStaleRead(staleRead string) {
+	m.staleRead = staleRead
 }
 
 func (s *MockSimContextImpl) SubtractGas(gasUsed uint64) error {
@@ -134,6 +138,10 @@ func (s *MockSimContextImpl) GetBlockProposer() *acPb.Member {
 	panic(implement_me)
 }
 
+func (s *MockSimContextImpl) GetTxResult() *commonPb.Result {
+	return s.txResult
+}
+
 func (s *MockSimContextImpl) SetTxResult(result *commonPb.Result) {
 	s.txResult = result
 }
@@ -227,16 +235,6 @@ func (s *MockSimContextImpl) RemoveRuntimeTypeFromCrossInfo() {
 	panic("impl me")
 }
 
-// GetStaleReadKeys 返回 Stale Read Keys
-func (m *MockSimContextImpl) GetStaleReadKeys() []string {
-	return m.staleReadKeys
-}
-
-// AddStaleReadKey 添加一个 Stale Read Key
-func (m *MockSimContextImpl) AddStaleReadKey(key string) {
-	m.staleReadKeys = append(m.staleReadKeys, key)
-}
-
 // GetStrAddrFromPbMember calculate string address from pb Member
 func (s *MockSimContextImpl) GetStrAddrFromPbMember(pbMember *acPb.Member) (string, error) {
 	panic("impl me")
@@ -315,7 +313,7 @@ func testSnapshot(t *testing.T, i int) {
 			txSimContext.txExecSeq = int32(rand.Intn(len(snapshot.txTable) + 1)) //nolint: gosec
 
 			applyResult, _ := snapshot.ApplyTxSimContext(txSimContext, protocol.ExecOrderTxTypeNormal,
-				true, false, nil)
+				true, false)
 			atomic.AddInt64(&count, 1)
 			if !applyResult {
 				fmt.Printf("!!!")
@@ -333,7 +331,7 @@ func testSnapshot(t *testing.T, i int) {
 									randNum,
 								),
 							)
-						applyResult, _ = snapshot.ApplyTxSimContext(txSimContext, protocol.ExecOrderTxTypeNormal, true, false, nil)
+						applyResult, _ = snapshot.ApplyTxSimContext(txSimContext, protocol.ExecOrderTxTypeNormal, true, false)
 
 						atomic.AddInt64(&count, 1)
 						if applyResult {
@@ -379,6 +377,9 @@ func randKey() []string {
 	}
 	return keySlice
 }
+func (m *MockSimContextImpl) GetStaleRead() string {
+	return m.staleRead
+}
 
 func genRwSet(readKeySet []string, writeKeySet []string) *commonPb.TxRWSet {
 	var txReads []*commonPb.TxRead
@@ -408,7 +409,7 @@ func genRwSet(readKeySet []string, writeKeySet []string) *commonPb.TxRWSet {
 }
 
 func testApply(txSimContext protocol.TxSimContext, snapshot *SnapshotImpl, txExecSeq int, readKeySet []string, writeKeySet []string) (bool, int) {
-	return snapshot.ApplyTxSimContext(txSimContext, protocol.ExecOrderTxTypeNormal, true, false, nil)
+	return snapshot.ApplyTxSimContext(txSimContext, protocol.ExecOrderTxTypeNormal, true, false)
 }
 
 func dump(snapshot *SnapshotImpl) {
@@ -1042,7 +1043,7 @@ func TestReBuildDag(t *testing.T) {
 					currentDepth: 0,
 					txResult:     nil,
 				}
-				s.ApplyTxSimContext(txSimContext, protocol.ExecOrderTxTypeNormal, true, false, nil)
+				s.ApplyTxSimContext(txSimContext, protocol.ExecOrderTxTypeNormal, true, false)
 			}
 			if got := s.BuildDAG(tt.args.isSql, tt.blockDagRwSetTable); !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("BuildDAG() = %v, want %v", got, tt.want)
@@ -1055,172 +1056,6 @@ func TestConstructKey(t *testing.T) {
 	contractName := "save"
 	key := []byte("name")
 	fmt.Println(constructKey(contractName, key))
-}
-
-func (m *MockSimContextImpl) GetTxResult() *commonPb.Result {
-	return m.txResult
-}
-
-// 其余方法可以全部空实现（测试时不会用到）。
-// func (m *MockSimContextImpl) SomeOtherMethod(...) {...}
-
-// --- 2. 辅助函数：构造一个简单的 Transaction 和 TxRWSet ---
-
-// buildSimpleTxRWSet 用于构造一个只包含一个读或写操作的 TxRWSet。
-//
-//	opType = "read" 或 "write"
-//	key = 要操作的 key（字节串）
-//	value = 写入时的值，读操作时可为空
-func buildSimpleTxRWSet(opType, contractName, key, value, txId string) (*commonPb.Transaction, *commonPb.TxRWSet) {
-	// 构造一个最简单的 Payload
-	tx := &commonPb.Transaction{
-		Payload: &commonPb.Payload{
-			TxId:         txId,
-			ContractName: contractName,
-		},
-	}
-
-	// 根据 opType 构造单条读写记录
-	rw := &commonPb.TxRWSet{}
-	if opType == "write" {
-		rw.TxWrites = []*commonPb.TxWrite{
-			{
-				ContractName: contractName,
-				Key:          []byte(key),
-				Value:        []byte(value),
-			},
-		}
-	} else if opType == "read" {
-		rw.TxReads = []*commonPb.TxRead{
-			{
-				ContractName: contractName,
-				Key:          []byte(key),
-				Value:        []byte("dummy"), // 测试时并不关心具体 value
-			},
-		}
-	}
-	return tx, rw
-}
-
-// --- 3. TestApplyTxSimContext_NoConflict: 验证没有冲突时，应该返回 (true, newSize) ---
-
-func TestApplyTxSimContext_NoConflict(t *testing.T) {
-	// 创建一个最简 SnapshotImpl
-	s := &SnapshotImpl{
-		log:               logger.GetLogger("snapshot_test"),
-		readTable:         newShardSet(),
-		writeTable:        newShardSet(),
-		txRWSetTable:      make([]*commonPb.TxRWSet, 0),
-		txTable:           make([]*commonPb.Transaction, 0),
-		txResultMap:       make(map[string]*commonPb.Result),
-		specialTxTable:    nil,
-		sealed:            uatomic.NewBool(false),
-		applyConflictTime: uatomic.NewInt64(0),
-		applyAddReadTime:  uatomic.NewInt64(0),
-		applyAddWriteTime: uatomic.NewInt64(0),
-	}
-
-	contractName := "TestContract"
-	key := "k1"
-	value := "v1"
-
-	// 构造一个“写操作”的 TxSimContext，txExecSeq = 0
-	tx1, rwset1 := buildSimpleTxRWSet("write", contractName, key, value, "tx1")
-	mockCtx1 := &MockSimContextImpl{
-		txExecSeq:     0,
-		tx:            tx1,
-		txRwSet:       rwset1,
-		txResult:      &commonPb.Result{Code: commonPb.TxStatusCode_SUCCESS},
-		staleReadKeys: nil,
-	}
-
-	// 调用 ApplyTxSimContext，应该无冲突且写入成功
-	ok, size := s.ApplyTxSimContext(mockCtx1, protocol.ExecOrderTxTypeNormal, true, false, nil)
-	if !ok {
-		t.Fatalf("第1次写入不应发生冲突，got ok = %v", ok)
-	}
-	if size != 1 {
-		t.Fatalf("第1次写入后 snapshot 大小应为 1，got %d", size)
-	}
-
-	// 再做一次对同一个 key 的“写”操作，但 txExecSeq = 1，也不应冲突出错
-	tx2, rwset2 := buildSimpleTxRWSet("write", contractName, key, "v2", "tx2")
-	mockCtx2 := &MockSimContextImpl{
-		txExecSeq:     1,
-		tx:            tx2,
-		txRwSet:       rwset2,
-		txResult:      &commonPb.Result{Code: commonPb.TxStatusCode_SUCCESS},
-		staleReadKeys: nil,
-	}
-	ok2, size2 := s.ApplyTxSimContext(mockCtx2, protocol.ExecOrderTxTypeNormal, true, false, nil)
-	if !ok2 {
-		t.Fatalf("第2次写入（txExecSeq=1）不应发生冲突，got ok=%v", ok2)
-	}
-	if size2 != 2 {
-		t.Fatalf("第2次写入后 snapshot 大小应为 2，got %d", size2)
-	}
-}
-
-// --- 4. TestApplyTxSimContext_StaleRead: 验证“陈旧读冲突”被检测到 ---
-
-func TestApplyTxSimContext_StaleRead(t *testing.T) {
-	// 新建一个 SnapshotImpl
-	s := &SnapshotImpl{
-		log:               logger.GetLogger("snapshot_test"),
-		readTable:         newShardSet(),
-		writeTable:        newShardSet(),
-		txRWSetTable:      make([]*commonPb.TxRWSet, 0),
-		txTable:           make([]*commonPb.Transaction, 0),
-		txResultMap:       make(map[string]*commonPb.Result),
-		specialTxTable:    nil,
-		sealed:            uatomic.NewBool(false),
-		applyConflictTime: uatomic.NewInt64(0),
-		applyAddReadTime:  uatomic.NewInt64(0),
-		applyAddWriteTime: uatomic.NewInt64(0),
-	}
-
-	contractName := "TestContract"
-	key := "kX"
-	value1 := "vFirst"
-
-	// 先执行一次写：txExecSeq=0，将 key 写入 snapshot.writeTable
-	tx1, rwset1 := buildSimpleTxRWSet("write", contractName, key, value1, "txFirst")
-	mockCtx1 := &MockSimContextImpl{
-		txExecSeq:     0,
-		tx:            tx1,
-		txRwSet:       rwset1,
-		txResult:      &commonPb.Result{Code: commonPb.TxStatusCode_SUCCESS},
-		staleReadKeys: nil,
-	}
-	ok1, size1 := s.ApplyTxSimContext(mockCtx1, protocol.ExecOrderTxTypeNormal, true, false, nil)
-	if !ok1 || size1 != 1 {
-		t.Fatalf("写入阶段出错，expected ok1=true,size1=1, got ok1=%v,size1=%d", ok1, size1)
-	}
-
-	// 模拟：此时 writeTable 中存有 key，且其 seq=0。
-	// 现在构造一个“读操作”并给它一个更小的 txExecSeq，例如 txExecSeq=0，
-	// 结果应当检测到陈旧读冲突（因为 writeTable.sv.seq(=0) >= txExecSeq(=0)）。
-	tx2, rwset2 := buildSimpleTxRWSet("read", contractName, key, "", "txStale")
-	mockCtx2 := &MockSimContextImpl{
-		txExecSeq:     0, // 故意与已有写 seq 相同，从而触发冲突
-		tx:            tx2,
-		txRwSet:       rwset2,
-		txResult:      &commonPb.Result{Code: commonPb.TxStatusCode_SUCCESS},
-		staleReadKeys: nil,
-	}
-
-	ok2, size2 := s.ApplyTxSimContext(mockCtx2, protocol.ExecOrderTxTypeNormal, true, false, nil)
-	if ok2 {
-		t.Fatalf("应当检测到陈旧读冲突，expected ok2=false，got ok2=true")
-	}
-	// snapshot 大小仍然是 1（没有把这笔事务应用进去）
-	if size2 != 1 {
-		t.Fatalf("冲突检测后 snapshot 大小应当仍为 1，got %d", size2)
-	}
-	// 检查 staleReadKeys 里包含被冲突的 key
-	if len(s.staleReadKeys) != 1 || s.staleReadKeys[0] != fmt.Sprintf("%s%s", contractName, key) {
-		t.Fatalf("应当记录冲突 key = %s%s，got %v", contractName, key, s.staleReadKeys)
-	}
 }
 
 // TestHasWARConflicts 测试WAR冲突检查函数

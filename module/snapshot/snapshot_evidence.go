@@ -22,7 +22,15 @@ import (
 type SnapshotEvidence struct {
 	delegate      *SnapshotImpl
 	log           protocol.Logger
-	staleReadKeys []string
+	staleRead string
+}
+
+func (s *SnapshotEvidence) GetStaleRead() string {
+	return s.staleRead
+}
+
+func (s *SnapshotEvidence) SetStaleRead(staleRead string) {
+	s.staleRead = staleRead
 }
 
 // GetBlockFingerprint returns current block fingerprint
