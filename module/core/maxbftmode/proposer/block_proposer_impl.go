@@ -332,7 +332,7 @@ func (bp *BlockProposerImpl) proposing(height uint64, preHash []byte) (*consensu
 
 		bp.log.Warnf("txbatch oversize expect <= %d, got %d", txCapacity, len(fetchBatch))
 	}
-	// ZYF 主节点将交易完整执行一遍，并将生成的区块缓存到Cache
+
 	block, timeLasts, err := bp.generateNewBlock(
 		height,
 		preHash,
@@ -355,7 +355,6 @@ func (bp *BlockProposerImpl) proposing(height uint64, preHash []byte) (*consensu
 
 		return nil, err
 	}
-	// ZYF 主节点将Cache中缓存的新生成区块取出
 	_, txsRwSet, _ := bp.proposalCache.GetProposedBlock(block)
 
 	cutBlock := new(commonpb.Block)
@@ -365,7 +364,7 @@ func (bp *BlockProposerImpl) proposing(height uint64, preHash []byte) (*consensu
 	} else {
 		cutBlock = block
 	}
-	// ZYF 主节点将取出的区块广播出去，从节点收到提议后进行共识验证
+
 	bp.msgBus.Publish(msgbus.ProposedBlock,
 		&consensuspb.ProposalBlock{Block: block, TxsRwSet: txsRwSet, CutBlock: cutBlock})
 
@@ -576,7 +575,7 @@ func (bp *BlockProposerImpl) getDuration() time.Duration {
 // getChainVersion, get chain version from config.
 // If not access from config, use default value.
 // @Deprecated
-// nolint: unused
+//nolint: unused
 func (bp *BlockProposerImpl) getChainVersion() uint32 {
 	if bp.chainConf == nil || bp.chainConf.ChainConfig() == nil {
 		bp.log.Warnf("No chain config found, use default block version:%d", protocol.DefaultBlockVersion)
@@ -626,7 +625,7 @@ func (bp *BlockProposerImpl) setIsSelfProposer(isSelfProposer bool) {
 	}
 }
 
-// isSelfProposer, return if this node is consensus proposer
+//isSelfProposer, return if this node is consensus proposer
 func (bp *BlockProposerImpl) isSelfProposer() bool {
 	bp.proposerMu.RLock()
 	defer bp.proposerMu.RUnlock()

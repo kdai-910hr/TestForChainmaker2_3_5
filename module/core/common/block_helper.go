@@ -11,14 +11,12 @@ import (
 	"encoding/hex"
 	"fmt"
 	"runtime/debug"
-	"strconv"
 	"sync"
 	"sync/atomic"
 
 	"chainmaker.org/chainmaker-go/module/core/common/coinbasemgr"
 
 	"chainmaker.org/chainmaker-go/module/core/common/scheduler"
-	"chainmaker.org/chainmaker-go/module/core/common/switch_control"
 	"chainmaker.org/chainmaker-go/module/core/provider/conf"
 	"chainmaker.org/chainmaker-go/module/subscriber"
 	"chainmaker.org/chainmaker/common/v2/bytehelper"
@@ -146,7 +144,6 @@ func (bb *BlockBuilder) GenerateNewBlock(
 	bb.storeHelper.BeginDbTransaction(snapshot.GetBlockchainStore(), block.GetTxKey())
 
 	vmStartTick := utils.CurrentTimeMillisSeconds()
-	// ZYF 主节点第一次执行交易，生成DAG与读写集
 	txRWSetMap, contractEventMap, err := bb.txScheduler.Schedule(block, validatedTxs, snapshot)
 
 	ssLasts := beginDbTick - ssStartTick
@@ -223,7 +220,6 @@ func (bb *BlockBuilder) GenerateNewBlock(
 
 	// cache proposed block
 	bb.log.Debugf("set proposed block(%d,%x)", block.Header.BlockHeight, block.Header.BlockHash)
-	// ZYF 主节点将生成的待提议的新区块加入到Cache中
 	if err = bb.proposalCache.SetProposedBlock(block, txRWSetMap, contractEventMap, true); err != nil {
 		return block, timeLasts, err
 	}
@@ -539,14 +535,6 @@ func CheckBlockDigests(block *commonPb.Block, txHashes [][]byte, hashType string
 		log.Error(err)
 		return err
 	}
-	//TODO 交易的读写依赖校验通过，DAG的校验也已经通过
-	// 因此可以将读写依赖带入算法代价模型中计算，检验ConsensusArgs中的决策是否正确
-	if schedule, ok := block.AdditionalData.ExtraData[scheduler.TBFTAdditionalDataSchedule]; !ok {
-		log.Debugf("ZYF fail to extract schedule method arg from additional data of block")
-		return fmt.Errorf("fail to extract schedule method arg from additional data of block")
-	} else {
-		log.Debug("ZYF Validate schedule method args from block additional data success: ", string(schedule))
-	}
 	return nil
 }
 
@@ -648,7 +636,7 @@ func (vb *VerifierBlock) FetchLastBlock(block *commonPb.Block) (*commonPb.Block,
 func (vb *VerifierBlock) ValidateBlock(
 	block, lastBlock *commonPb.Block, hashType string, timeLasts map[string]int64, mode protocol.VerifyMode) (
 	map[string]*commonPb.TxRWSet, map[string][]*commonPb.ContractEvent, map[string]int64, *RwSetVerifyFailTx, error) {
-	vb.log.Info("ZYF Go to ValidateBlock!")
+
 	// verify block stamp
 	if vb.chainConf.ChainConfig().Block.BlockTimestampVerify && mode == protocol.CONSENSUS_VERIFY {
 		currentTime := utils.CurrentTimeSeconds()
@@ -706,14 +694,6 @@ func (vb *VerifierBlock) ValidateBlock(
 		timeLasts[TxRoot] = rootsLast
 		return nil, nil, timeLasts, nil, nil
 	}
-
-	// verify strategy:
-	strategy, _ := strconv.Atoi(string(block.AdditionalData.ExtraData["TBFTAdditionalDataSchedule"]))
-	if switch_control.ControlType(strategy) != switch_control.DeriveAlgorithm(block.Dag) {
-		return nil, nil, timeLasts, nil, fmt.Errorf("ZYF block dag strategy %s not match with consensus strategy %s",
-			switch_control.DeriveAlgorithm(block.Dag), switch_control.ControlType(strategy))
-	}
-
 	// 1. 空交易
 	// 2. recoveryBlock
 	// verify if txs are duplicate in this block
@@ -729,7 +709,6 @@ func (vb *VerifierBlock) ValidateBlock(
 	vb.storeHelper.BeginDbTransaction(snapshot.GetBlockchainStore(), block.GetTxKey())
 
 	startVMTick := utils.CurrentTimeMillisSeconds()
-	vb.log.Infof("ZYF Using Strategy " + strconv.Itoa(int(strategy)) + "!")
 	txRWSetMap, txResultMap, err := vb.txScheduler.SimulateWithDag(block, snapshot)
 	vmLasts := utils.CurrentTimeMillisSeconds() - startVMTick
 	vb.log.Infof("Validate block[%v](txs:%v), time used(new snapshot:%v, start DB transaction:%v, vm:%v)",
@@ -780,7 +759,6 @@ func (vb *VerifierBlock) ValidateBlock(
 	}
 	// verify TxRoot
 	startRootsTick := utils.CurrentTimeMillisSeconds()
-	vb.log.Info("ZYF Go to CheckBlockDigests!")
 	err = CheckBlockDigests(block, txHashes, hashType, vb.log)
 	if err != nil {
 		return txRWSetMap, contractEventMap, timeLasts, nil, err
@@ -894,7 +872,7 @@ func (vb *VerifierBlock) ValidateBlockWithRWSets(
 	return contractEventMap, nil, nil
 }
 
-// nolint: staticcheck
+//nolint: staticcheck
 func CheckPreBlock(block *commonPb.Block, lastBlockHash []byte, proposedHeight uint64) error {
 
 	if err := IsHeightValid(block, proposedHeight); err != nil {
@@ -1222,7 +1200,7 @@ func (chain *BlockCommitterImpl) syncWithTxPool(block *commonPb.Block, height ui
 	return txRetry, batchRetry, nil, nil
 }
 
-// nolint: ineffassign, staticcheck
+//nolint: ineffassign, staticcheck
 func (chain *BlockCommitterImpl) checkLastProposedBlock(block *commonPb.Block) (
 	*commonPb.Block, map[string]*commonPb.TxRWSet, map[string][]*commonPb.ContractEvent, error) {
 	err := chain.verifier.VerifyBlock(block, protocol.SYNC_VERIFY)

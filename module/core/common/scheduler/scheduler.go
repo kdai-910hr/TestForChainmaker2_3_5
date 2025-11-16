@@ -9,7 +9,6 @@ package scheduler
 
 import (
 	"bytes"
-	"chainmaker.org/chainmaker-go/module/core/common/switch_control"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -52,9 +51,7 @@ const (
 )
 
 const (
-	// ZYF 这块实际是应该加在consensus-tbft/v2@v2.3.5/consensus_tbft_impl.go中的
-	TBFTAdditionalDataSchedule = "TBFTAdditionalDataSchedule"
-	ErrMsgOfGasLimitNotSet     = "field `GasLimit` must be set in payload."
+	ErrMsgOfGasLimitNotSet = "field `GasLimit` must be set in payload."
 )
 
 // TxScheduler transaction scheduler structure
@@ -74,8 +71,6 @@ type TxScheduler struct {
 	ac              protocol.AccessControlProvider
 	//wzy
 	txTimeCostChan chan txIdwithTime
-	//zyf
-	switchController *switch_control.SwitchControllerImpl
 }
 
 // wzy
@@ -122,19 +117,16 @@ func (ts *TxScheduler) Schedule(block *commonPb.Block, txBatch []*commonPb.Trans
 	txBatchSize := len(txBatch)
 	ts.log.Infof("schedule tx batch start, block %d, size = %d", block.Header.BlockHeight, txBatchSize)
 
-	// WJY: 创建 Goroutine 池 goRoutinePool 以管理并发任务，池的容量由配置中的 GetPoolCapacity 决定
 	var goRoutinePool *ants.Pool
 	poolCapacity := ts.StoreHelper.GetPoolCapacity()
-	// poolCapacity := ts.StoreHelper.GetPoolCapacity()
 	//原来的默认值为cpu数量4倍，单机4节点情况下一个节点平均最多获得1/4数量的线程
-	poolCapacity = poolCapacity / 4
+	//poolCapacity = poolCapacity / 4
 	ts.log.Infof("GetPoolCapacity() => %v", poolCapacity)
 	if goRoutinePool, err = ants.NewPool(poolCapacity, ants.WithPreAlloc(false)); err != nil {
 		return nil, nil, err
 	}
 	defer goRoutinePool.Release()
 
-	// WJY: 定义调度超时 timeoutC 及执行的起始时间 startTime
 	timeoutC := time.After(ScheduleTimeout * time.Second)
 	startTime := time.Now()
 
@@ -143,7 +135,6 @@ func (ts *TxScheduler) Schedule(block *commonPb.Block, txBatch []*commonPb.Trans
 
 	blockVersion := block.Header.BlockVersion
 	enableOptimizeChargeGas := coinbasemgr.IsOptimizeChargeGasEnabled(ts.chainConf)
-	//lhl enableSenderGroup := false
 	enableSenderGroup := ts.chainConf.ChainConfig().Core.EnableSenderGroup
 	enableConflictsBitWindow, conflictsBitWindow := ts.initOptimizeTools(txBatch)
 	var senderGroup *SenderGroup
@@ -159,21 +150,18 @@ func (ts *TxScheduler) Schedule(block *commonPb.Block, txBatch []*commonPb.Trans
 	}
 	//wzy
 	//切分起点
-	enableDAGPartial := ts.switchController.IsEnabled(switch_control.PartDAGControl) //ts.chainConf.ChainConfig().Core.EnableDAGpartial
-	if enableDAGPartial {
+	enableDAGpartial := true //ts.chainConf.ChainConfig().Core.EnableDAGpartial
+	if enableDAGpartial {
 		ts.txTimeCostChan = make(chan txIdwithTime, txBatchSize)
 	} else {
 		ts.txTimeCostChan = nil
 	}
 
-	// WJY: 计算块指纹 blockFingerPrint 并通知虚拟机调度器 VmManager 以准备执行
 	blockFingerPrint := string(utils.CalcBlockFingerPrintWithoutTx(block))
 	ts.VmManager.BeforeSchedule(blockFingerPrint, block.Header.BlockHeight)
 	defer ts.VmManager.AfterSchedule(blockFingerPrint, block.Header.BlockHeight)
 
 	// launch the go routine to dispatch tx to runningTxC
-	// WJY: 启动一个 Goroutine，调用 dispatchTxs 方法将交易调度至 runningTxC 通道。
-	// WJY: 此通道用于将待执行的交易传递给事务处理程序
 	go func() {
 		ts.log.Infof("before Schedule(...) dispatch txs of block(%v)", block.Header.BlockHeight)
 		if len(txBatch) == 0 {
@@ -196,40 +184,31 @@ func (ts *TxScheduler) Schedule(block *commonPb.Block, txBatch []*commonPb.Trans
 		ts.log.Infof("end Schedule(...) dispatch txs of block(%v)", block.Header.BlockHeight)
 	}()
 
-	// WJY: 根据并发策略（如 Gas 优化和区块版本），调整并行交易数量 parallelTxsNum
 	parallelTxsNum := len(txBatch)
 	if enableOptimizeChargeGas && blockVersion >= blockVersion2340 {
 		parallelTxsNum = senderCollection.getParallelTxsNum()
 		senderCollection.resetTotalGasUsed()
 	}
 
-	// WJY: 并启动事务处理程序 startTxHandler 以执行交易
 	// Put the pending transaction into the running queue
 	if parallelTxsNum > 0 {
 		go ts.startTxHandler(runningTxC, block, snapshot, finishC, goRoutinePool, enableConflictsBitWindow,
 			conflictsBitWindow, enableSenderGroup, senderGroup, senderCollection, timeoutC, enableOptimizeChargeGas,
 			parallelTxsNum)
-		// WJY: 等待所有交易处理完成（通过接收 scheduleFinishC 信号）
 		// Wait for schedule finish signal
 		<-ts.scheduleFinishC
 	}
-	// wzy
+	ts.log.Info("got schedule finish signal, close runningTxC ...")
 	if ts.txTimeCostChan != nil {
 		close(ts.txTimeCostChan)
 	}
 
 	// Build DAG from read-write table
-	// WJY: 封存快照 snapshot.Seal() 以确保数据一致性
 	snapshot.Seal()
 	timeCostA := time.Since(startTime)
-	// WJY: 调用 BuildDAG 方法生成区块的 DAG，
-	// WJY: DAG 结构根据交易的读写集冲突关系生成，用于定义交易的执行顺序
+
 	block.Dag = snapshot.BuildDAG(ts.chainConf.ChainConfig().Contract.EnableSqlSupport, nil)
-	// TODO ZYF BuildDAG或者走一个代价模型，应该返回应当使用哪种调度策略 1,2,...
-	// 然后将这个策略写入到block.AdditionalData中
-	strategy := switch_control.DeriveAlgorithm(block.Dag)
-	block.AdditionalData.ExtraData[TBFTAdditionalDataSchedule] = []byte(strconv.Itoa(int(strategy)))
-	ts.log.Infof("ZYF add schedule method args to block additional data success: %d", int(strategy))
+
 	ts.handleSpecialTxs(blockVersion, block, snapshot, txBatchSize, senderCollection, enableOptimizeChargeGas)
 
 	// if the block is not empty, append the charging gas tx
@@ -242,13 +221,14 @@ func (ts *TxScheduler) Schedule(block *commonPb.Block, txBatch []*commonPb.Trans
 	ts.log.Infof("schedule tx batch finished, block %d, success %d, txs execution cost %v, "+
 		"dag building cost %v, total used %v, tps %v", block.Header.BlockHeight, len(block.Dag.Vertexes), timeCostA,
 		timeCostB-timeCostA, timeCostB, float64(len(block.Dag.Vertexes))/(float64(timeCostB)/1e9))
-
+	ts.log.Infof("dag is : %+v", block.Dag)
 	txRWSetMap := ts.getTxRWSetTable(snapshot, block)
 	contractEventMap := ts.getContractEventMap(block)
 	//wzy
 	//判断是否需要分割dag
-	if enableDAGPartial {
+	if enableDAGpartial {
 		AUXRwMap := ts.partDAG(block, txRWSetMap)
+
 		AUXRwMapBytes, _ := json.Marshal(AUXRwMap)
 		block.AdditionalData.ExtraData["AUXRwMap"] = AUXRwMapBytes
 	}
@@ -261,7 +241,7 @@ func (ts *TxScheduler) startTxHandler(runningTxC chan *commonPb.Transaction,
 	goRoutinePool *ants.Pool, enableConflictsBitWindow bool, conflictsBitWindow *ConflictsBitWindow,
 	enableSenderGroup bool, senderGroup *SenderGroup, senderCollection *SenderCollection,
 	timeoutC <-chan time.Time, enableOptimizeChargeGas bool, parallelTxsNum int) {
-	counter := 0 // WJY: counter 用于跟踪交易处理次数，便于后续调试和日志记录
+	counter := 0
 	ts.log.Infof("running channel size is %d", cap(runningTxC))
 	failTxWithRwsetC := make(chan *commonPb.TransactionWithRWSet, cap(runningTxC))
 	failTxSet := make([]*commonPb.Transaction, 0, cap(runningTxC))
@@ -275,9 +255,7 @@ func (ts *TxScheduler) startTxHandler(runningTxC chan *commonPb.Transaction,
 		case tx := <-runningTxC:
 			ts.log.Debugf("prepare to submit running task for tx id:%s", tx.Payload.GetTxId())
 
-			// WJY: 调用 goRoutinePool.Submit 将 handleTx 函数作为任务提交给 Goroutine 池
 			err := goRoutinePool.Submit(func() {
-				// WJY: handleTx 函数处理交易的具体逻辑，并涉及冲突检测、发送方分组和快照更新等操作
 				handleTx(block, snapshot, ts, tx, runningTxC, finishC, failTxWithRwsetC, goRoutinePool, parallelTxsNum,
 					enableConflictsBitWindow, conflictsBitWindow, enableSenderGroup, senderGroup, senderCollection)
 			})
@@ -294,7 +272,10 @@ func (ts *TxScheduler) startTxHandler(runningTxC chan *commonPb.Transaction,
 			}
 			// 只有当收集到足够多的交易且尚未处理过失败交易时，才进行处理
 			if !failTxProcessed && len(snapshot.GetTxTable())+len(failTxSet) >= parallelTxsNum {
-				ts.log.Infof("start handle fail txs, fail tx size:%d, snapshot tx size:%d", len(failTxSet), len(snapshot.GetTxTable()))
+				cnt1 := len(snapshot.GetTxTable())
+				cnt2 := len(failTxSet)
+				ts.log.Infof("start handle fail txs, fail tx size:%d, snapshot tx size:%d", cnt1, cnt2)
+				ts.log.Infof("wzy: blcok %d : abort / commit is :%d / %d = %d ", block.Header.BlockHeight, cnt1, cnt1+cnt2, float32(cnt1)/float32((cnt1+cnt2)))
 				failTxProcessed = true
 				err := goRoutinePool.Submit(func() {
 					ts.startFailTxHandler(failTxRwSet, failTxSet, block, snapshot, goRoutinePool, parallelTxsNum, finishC, timeoutC,
@@ -305,9 +286,10 @@ func (ts *TxScheduler) startTxHandler(runningTxC chan *commonPb.Transaction,
 					failTxProcessed = false
 				}
 			}
+
 		case <-timeoutC:
-			// 从 timeoutC 通道接收到超时信号，表示调度达到了设定的时间限制
-			ts.log.Debugf("Schedule(...) timeout ...")
+			ts.log.Info("Schedule(...) timeout ...inTxHandler")
+			ts.log.Info("schedule finish signal 3")
 			ts.scheduleFinishC <- true
 			if !enableOptimizeChargeGas && enableSenderGroup {
 				senderGroup.doneTxKeyC <- ""
@@ -315,8 +297,8 @@ func (ts *TxScheduler) startTxHandler(runningTxC chan *commonPb.Transaction,
 			ts.log.Warnf("block [%d] schedule reached time limit", block.Header.BlockHeight)
 			return
 		case <-finishC:
-			// 从 finishC 通道接收到完成信号，表示所有交易已处理完毕
 			ts.log.Debugf("Schedule(...) finish ...")
+			ts.log.Info("schedule finish signal 4")
 			ts.scheduleFinishC <- true
 			if !enableOptimizeChargeGas && enableSenderGroup {
 				senderGroup.doneTxKeyC <- ""
@@ -384,7 +366,6 @@ func handleTx(block *commonPb.Block, snapshot protocol.Snapshot,
 	enableSenderGroup bool, senderGroup *SenderGroup, senderCollection *SenderCollection) {
 
 	// If snapshot is sealed, no more transaction will be added into snapshot
-	// WJY: 如果 snapshot 已被封存（即已完成所有交易的应用），则直接返回，不再处理该交易
 	if snapshot.IsSealed() {
 		ts.log.DebugDynamic(func() string {
 			return fmt.Sprintf("handleTx(`%v`) snapshot has already sealed.", tx.GetPayload().TxId)
@@ -394,19 +375,15 @@ func handleTx(block *commonPb.Block, snapshot protocol.Snapshot,
 	var start time.Time
 	//wzy
 
-	enableDAGPartial := ts.switchController.IsEnabled(switch_control.PartDAGControl) //ts.chainConf.ChainConfig().Core.EnableDAGpartial
-	if localconf.ChainMakerConfig.MonitorConfig.Enabled || enableDAGPartial {
+	enableDAGpartial := true //ts.chainConf.ChainConfig().Core.EnableDAGpartial
+	enablePreDag := true     //localconf.ChainMakerConfig.Core.EnablePreDag
+	if localconf.ChainMakerConfig.MonitorConfig.Enabled || enableDAGpartial {
 		start = time.Now()
 	}
 
 	// execute tx, and get
 	// 1) the read/write set
 	// 2) the result that telling if the invoke success.
-
-	// WJY: 调用 executeTx 方法执行交易，得到以下结果：
-	// WJY:   txSimContext：包含交易的模拟执行上下文，包括读写集。
-	// WJY:   specialTxType：交易类型（用于特殊处理）。
-	// WJY:   runVmSuccess：交易是否成功执行，指示虚拟机运行结果
 	txSimContext, specialTxType, runVmSuccess := ts.executeTx(tx, snapshot, block, senderCollection)
 	costTime := time.Since(start)
 	tx.Result = txSimContext.GetTxResult()
@@ -415,30 +392,22 @@ func handleTx(block *commonPb.Block, snapshot protocol.Snapshot,
 	})
 
 	// Apply failed means this tx's read set conflict with other txs' write set
-	// WJY: 调用 ApplyTxSimContext 方法尝试将交易应用到 snapshot 中。
-	// WJY: applyResult 表示是否成功应用，applySize 表示当前快照中已应用的交易数量。
-	// WJY: 如果应用失败，说明该交易的读写集与其他交易发生冲突
 	applyResult, applySize := snapshot.ApplyTxSimContext(txSimContext, specialTxType,
-		runVmSuccess, false, ts.switchController)
+		runVmSuccess, false)
 	ts.log.DebugDynamic(func() string {
 		return fmt.Sprintf("handleTx(`%v`) => ApplyTxSimContext(...) => snapshot.txTable = %v, applySize = %v",
 			tx.GetPayload().TxId, len(snapshot.GetTxTable()), applySize)
 	})
-	ts.log.Infof("WJY: handleTx(`%v`), result(`%v`)", tx.GetPayload().TxId, applyResult)
 
 	// reduce the conflictsBitWindow size to eliminate the read/write set conflict
-
-	// WJY: 如果 applyResult 为 false（应用失败），则执行以下操作：
-	// WJY:   如果 enableConflictsBitWindow 启用，调用 adjustPoolSize 调整 Goroutine 池大小，以减少并发冲突。
-	// WJY:   将冲突交易重新放回 runningTxC 通道，以便稍后重试。
-	// WJY:   记录调试日志，显示交易应用失败的结果及其相关信息
 	if !applyResult {
+
 		if enableConflictsBitWindow {
 			ts.adjustPoolSize(goRoutinePool, conflictsBitWindow, ConflictTx)
 		}
 		// wzy
 		// 提交失败，收集失败的交易进行读写集分析
-		if enableDAGPartial {
+		if enablePreDag {
 			txRWSet := txSimContext.GetTxRWSet(runVmSuccess)
 			tx := txSimContext.GetTx()
 			if txRWSet == nil {
@@ -470,7 +439,7 @@ func handleTx(block *commonPb.Block, snapshot protocol.Snapshot,
 			}
 		}
 		//wzy最后一笔未处理的交易可能最终成功提交，因此对于成功提交的交易同样需要检测成功与失败交易的数量是否等于总tx数，通过channel返回触发检测
-		if enableDAGPartial {
+		if enablePreDag {
 			failTxWithRwsetC <- nil
 		}
 
@@ -571,8 +540,8 @@ func handleFailTx(block *commonPb.Block, snapshot protocol.Snapshot,
 	var start time.Time
 	//wzy
 
-	enableDAGPartial := true //ts.chainConf.ChainConfig().Core.EnableDAGpartial
-	if localconf.ChainMakerConfig.MonitorConfig.Enabled || enableDAGPartial {
+	enableDAGpartial := true //ts.chainConf.ChainConfig().Core.EnableDAGpartial
+	if localconf.ChainMakerConfig.MonitorConfig.Enabled || enableDAGpartial {
 		start = time.Now()
 	}
 
@@ -588,7 +557,7 @@ func handleFailTx(block *commonPb.Block, snapshot protocol.Snapshot,
 
 	// Apply failed means this tx's read set conflict with other txs' write set
 	isApplySuccess, applySize := snapshot.ApplyTxSimContext(txSimContext, specialTxType,
-		runVmSuccess, false, ts.switchController)
+		runVmSuccess, false)
 	ts.log.DebugDynamic(func() string {
 		return fmt.Sprintf("handleTx(`%v`) => ApplyTxSimContext(...) => snapshot.txTable = %v, applySize = %v",
 			tx.GetPayload().TxId, len(snapshot.GetTxTable()), applySize)
@@ -603,20 +572,16 @@ func handleFailTx(block *commonPb.Block, snapshot protocol.Snapshot,
 		// wzy
 		// 提交失败直接重做
 		runningTxC <- txIndex
-
 		ts.log.DebugDynamic(func() string {
 			return fmt.Sprintf("apply to snapshot failed, tx id:%s, result:%+v, apply count:%d",
 				tx.Payload.GetTxId(), txSimContext.GetTxResult(), applySize)
 		})
 
 	} else {
-		// WJY: 如果 applyResult 为 true（应用成功），则调用 handleApplyResult 方法执行以下操作：
-		// WJY:   根据配置调整并发策略（如 conflictsBitWindow、senderGroup）
-		// WJY:   记录调试日志，显示交易成功应用的结果及其相关信息
 		ts.handleApplyResult(enableConflictsBitWindow, enableSenderGroup,
 			conflictsBitWindow, senderGroup, goRoutinePool, tx, start)
 
-		//wzy 向通道发送txid和时间cost
+		//wzy向通道发送txid和时间cost
 		if ts.txTimeCostChan != nil {
 			ts.txTimeCostChan <- txIdwithTime{
 				txId:     tx.Payload.GetTxId(),
@@ -633,12 +598,6 @@ func handleFailTx(block *commonPb.Block, snapshot protocol.Snapshot,
 	if applySize >= parallelTxsNum {
 		finishC <- true
 	}
-}
-
-// wzy处理失败交易进行重排序加入队列
-func (ts *TxScheduler) handleFailtxWithRwset(runningTxC chan *commonPb.Transaction,
-	txwithRwSet *commonPb.TransactionWithRWSet) {
-
 }
 
 func (ts *TxScheduler) initOptimizeTools(
@@ -735,13 +694,12 @@ func (ts *TxScheduler) SimulateWithDag(block *commonPb.Block, snapshot protocol.
 	defer ts.lock.Unlock()
 
 	defer ts.releaseContractCache()
-	strategy, _ := strconv.Atoi(string(block.AdditionalData.ExtraData["TBFTAdditionalDataSchedule"]))
-	ts.switchController.TryEnable(switch_control.ControlType(strategy))
-	ts.log.Infof("ZYF using strategy " + strconv.Itoa(int(strategy)) + "!")
+
 	var (
 		startTime  = time.Now()
 		txRWSetMap = make(map[string]*commonPb.TxRWSet, len(block.Txs))
 	)
+
 	if block.Header.BlockVersion >= blockVersion2300 && len(block.Txs) != len(block.Dag.Vertexes) {
 		ts.log.Warnf("found dag size mismatch txs length in "+
 			"block[%x] dag:%d, txs:%d", block.Header.BlockHash, len(block.Dag.Vertexes), len(block.Txs))
@@ -761,10 +719,10 @@ func (ts *TxScheduler) SimulateWithDag(block *commonPb.Block, snapshot protocol.
 	}
 
 	// Construct the adjacency list of dag, which describes the subsequent adjacency transactions of all transactions
-	if strategy == 2 {
-		ts.cutDAG(block)
+	dag := ts.cutDAG(block)
+	if dag == nil {
+		dag = block.Dag
 	}
-	dag := block.Dag
 	txIndexBatch, dagRemain, reverseDagRemain, err := ts.initSimulateDag(dag)
 	if err != nil {
 		ts.log.Warnf("initialize simulate dag error:%s", err)
@@ -847,16 +805,18 @@ func (ts *TxScheduler) SimulateWithDag(block *commonPb.Block, snapshot protocol.
 				}
 			case <-finishC:
 				ts.log.Debugf("block [%d] simulate with dag finish", block.Header.BlockHeight)
+				ts.log.Info("schedule finish signal 6")
 				ts.scheduleFinishC <- true
 				return
 			case <-timeoutC:
 				ts.log.Errorf("block [%d] simulate with dag timeout", block.Header.BlockHeight)
+				ts.log.Info("schedule finish signal 7")
 				ts.scheduleFinishC <- true
 				return
 			}
 		}
 	}()
-
+	ts.log.Info("schedule finish signal 8")
 	<-ts.scheduleFinishC
 	snapshot.Seal()
 	timeUsed := time.Since(startTime)
@@ -899,7 +859,7 @@ func (ts *TxScheduler) initSimulateDag(dag *commonPb.DAG) (
 		cutNeighborCnt := 0
 		lastNeighbor := dagSize
 		for index, neighbor := range neighbors.Neighbors {
-			//wzy 跳过被标记为切割的依赖
+			//跳过被标记为切割的依赖
 			if neighbor == dagSize {
 				cutNeighborCnt++
 				continue
@@ -934,17 +894,15 @@ func handleTxInSimulateWithDag(
 	ts *TxScheduler, tx *commonPb.Transaction, txIndex int,
 	doneTxC chan *applyResult, txBatchSize int,
 	collection *SenderCollection) {
-	//zyf 这里如果没有AUXRWMap, executeTxWithIndex会回退到executeTx
+
 	t := txIndex
 	if _, ok := block.AdditionalData.ExtraData["AUXRwMap"]; !ok {
 		t = -1
 	}
 	txSimContext, specialTxType, runVmSuccess := ts.executeTxWithIndex(tx, snapshot, block, collection, t)
 
-	//txSimContext, specialTxType, runVmSuccess := ts.executeTx(tx, snapshot, block, collection)
-
 	// if apply failed means this tx's read set conflict with other txs' write set
-	isApplySuccess, applySize := snapshot.ApplyTxSimContext(txSimContext, specialTxType, runVmSuccess, true, ts.switchController)
+	isApplySuccess, applySize := snapshot.ApplyTxSimContext(txSimContext, specialTxType, runVmSuccess, true)
 	doneTxC <- &applyResult{txIndex, isApplySuccess, applySize}
 	if !isApplySuccess {
 		ts.log.Warnf("failed to apply snapshot for tx id:%s, shouldn't have its rwset",
@@ -1016,10 +974,8 @@ func (ts *TxScheduler) executeTx(
 		}
 	}
 
-	// WJY: 根据区块版本调用适配的虚拟机运行函数（runVM2300、runVM2220、runVM2210）来执行交易
 	ts.log.Debugf("run vm start for tx:%s", tx.Payload.GetTxId())
 	if blockVersion >= 2300 {
-		// WJY: Debug 时发现只走了下面这个分支
 		if txResult, specialTxType, err = ts.runVM2300(tx, txSimContext, enableOptimizeChargeGas); err != nil {
 			runVmSuccess = false
 			ts.log.Errorf("failed to run vm for tx id:%s,contractName:%s, tx result:%+v, error:%+v",
@@ -1065,9 +1021,11 @@ func (ts *TxScheduler) executeTxWithIndex(
 	if index == -1 {
 		return ts.executeTx(tx, snapshot, block, collection)
 	}
+	//t := txSimContext.GetTxExecSeq()
 	//设置交易的序号
 	txSimContext := vm.NewTxSimContext(ts.VmManager, snapshot, tx, block.Header.BlockVersion, ts.log)
 	txSimContext.SetTxExecSeq(index)
+	//defer txSimContext.SetTxExecSeq(t)
 
 	ts.log.DebugDynamic(func() string {
 		return fmt.Sprintf("NewTxSimContext finished for tx id:%s", tx.Payload.GetTxId())
@@ -1222,7 +1180,7 @@ func (ts *TxScheduler) simulateSpecialTxs(specialTxs []*commonPb.Transaction, da
 				txSimContext, specialTxType, runVmSuccess := ts.executeTx(tx, snapshot, block, collection)
 				tx.Result = txSimContext.GetTxResult()
 				// apply tx
-				applyResult, applySize := snapshot.ApplyTxSimContext(txSimContext, specialTxType, runVmSuccess, true, ts.switchController.Controllers)
+				applyResult, applySize := snapshot.ApplyTxSimContext(txSimContext, specialTxType, runVmSuccess, true)
 				if !applyResult {
 					ts.log.Debugf("failed to apply according to dag with tx %s ", tx.Payload.TxId)
 					runningTxC <- tx
@@ -1247,16 +1205,19 @@ func (ts *TxScheduler) simulateSpecialTxs(specialTxs []*commonPb.Transaction, da
 				if applySize >= txBatchSize {
 					ts.log.Debugf("block [%d] schedule special txs finished, apply size:%d, len of txs:%d, "+
 						"len of special txs:%d", block.Header.BlockHeight, applySize, txBatchSize, specialTxsLen)
+					ts.log.Info("schedule finish signal 9")
 					scheduleFinishC <- true
 					return
 				}
 			case <-timeoutC:
 				ts.log.Errorf("block [%d] schedule special txs timeout", block.Header.BlockHeight)
+				ts.log.Info("schedule finish signal 10")
 				scheduleFinishC <- true
 				return
 			}
 		}
 	}()
+	ts.log.Info("schedule finish signal 11")
 	<-scheduleFinishC
 }
 
@@ -1275,6 +1236,7 @@ func (ts *TxScheduler) shrinkDag(txIndex int, dagRemain map[int]dagNeighbors,
 }
 
 func (ts *TxScheduler) Halt() {
+	ts.log.Info("schedule finish signal 12")
 	ts.scheduleFinishC <- true
 }
 
@@ -2032,7 +1994,7 @@ func (ts *TxScheduler) executeChargeGasTx(
 	snapshot.ApplyTxSimContext(
 		txSimContext,
 		protocol.ExecOrderTxTypeChargeGas,
-		true, true, ts.switchController.Controllers)
+		true, true)
 
 	return txSimContext
 }
@@ -2320,10 +2282,10 @@ func (ts *TxScheduler) partDAG(block *commonPb.Block, rwSetMap map[string]*commo
 		txWeightMap[txIdWithTimeCost.txId] = txIdWithTimeCost.costTime
 		totalWeight += txIdWithTimeCost.costTime
 	}
-	ts.log.Info("total Weight is : %+v", totalWeight)
+	ts.log.Debug("total Weight is : %+v", totalWeight)
 
 	var txWeightThreshold = totalWeight / uint64(dagCount)
-	ts.log.Info("txWeightThreshold is : %+v", txWeightThreshold)
+	ts.log.Debug("txWeightThreshold is : %+v", txWeightThreshold)
 	//索引转换
 	txWeight := make([]uint64, txCount)
 	for i, tx := range block.Txs {
@@ -2428,8 +2390,8 @@ func (ts *TxScheduler) partDAG(block *commonPb.Block, rwSetMap map[string]*commo
 		}
 
 	}
-	ts.log.Info("subDag set is : %+v", subDAGSet)
-	ts.log.Debugf("cutEdgeSet is : %+v", cutEdgeSet)
+	//ts.log.Info("subDag set is : %+v", subDAGSet)
+	//ts.log.Info("cutEdgeSet is : %+v", cutEdgeSet)
 	//处理未加入的tx
 	for index := range isVisit {
 		if !isVisit[index] {
@@ -2443,8 +2405,8 @@ func (ts *TxScheduler) partDAG(block *commonPb.Block, rwSetMap map[string]*commo
 			}
 		}
 	}
-	ts.log.Info("subDag set is: %+v", subDAGSet)
-	ts.log.Debugf("cutEdgeSet is : %+v", cutEdgeSet)
+	ts.log.Info("subDag set is:", subDAGSet)
+	ts.log.Info("cutEdgeSet is:", cutEdgeSet)
 	//new：使用切片存储然后序列化，在反序列化时直接放入AUXdata
 	AUXRwMap := make(map[string][]Sv)
 	for _, edge := range cutEdgeSet {
@@ -2471,12 +2433,10 @@ func (ts *TxScheduler) partDAG(block *commonPb.Block, rwSetMap map[string]*commo
 		})
 		AUXRwMap[key] = slice
 	}
-	ts.log.Debugf("AUXRwMap is : %+v", AUXRwMap)
+	ts.log.Info("AUXRwMap is :", AUXRwMap)
 	//修改根据割边集合修改dag
 	//9.28不再切割原始dag，将cutedge信息打包
 	cutEdgeSetBytes, _ := json.Marshal(cutEdgeSet)
-	cutEdgeSetSizeBytes, _ := json.Marshal(len(cutEdgeSet))
-	block.AdditionalData.ExtraData["cutEdgeSetSize"] = cutEdgeSetSizeBytes
 	block.AdditionalData.ExtraData["cutEdgeSet"] = cutEdgeSetBytes
 	// for _, edge := range cutEdgeSet {
 	// 	//数组删除代价大，就用修改依赖值为txCount+1表示删除，后续simulate时也是先转换成map再模拟拓扑排序执行，在转换map时过滤掉依赖于自己的边即可
@@ -2497,28 +2457,33 @@ func (ts *TxScheduler) partDAG(block *commonPb.Block, rwSetMap map[string]*commo
 }
 
 // 9.28新增切割dag函数
-func (ts *TxScheduler) cutDAG(block *commonPb.Block) {
+func (ts *TxScheduler) cutDAG(block *commonPb.Block) *commonPb.DAG {
 	txCount := block.Header.TxCount
-	var size int
-	err := json.Unmarshal(block.AdditionalData.ExtraData["cutEdgeSetSize"], &size)
-	if err != nil {
-		ts.log.Errorf("Unmarshal cutEdgeSetSize Error %+v", err)
-		return
-	}
-	cutEdgeSet := make([]Edge, size)
-	err = json.Unmarshal(block.AdditionalData.ExtraData["cutEdgeSet"], &cutEdgeSet)
+	var cutEdgeSet []Edge
+	err := json.Unmarshal(block.AdditionalData.ExtraData["cutEdgeSet"], &cutEdgeSet)
 	if err != nil {
 		ts.log.Errorf("Unmarshal cutEdgeSet Error %+v", err)
-		return
+		return nil
 	}
+	dag := &commonPb.DAG{}
+	dag.Vertexes = make([]*commonPb.DAG_Neighbor, txCount)
+
+	for i, vertex := range block.Dag.Vertexes {
+		dag.Vertexes[i] = &commonPb.DAG_Neighbor{
+			Neighbors: make([]uint32,len(vertex.Neighbors)),
+		}
+		copy(dag.Vertexes[i].Neighbors, vertex.Neighbors)
+	}
+
 	for _, edge := range cutEdgeSet {
 		//数组删除代价大，就用修改依赖值为txCount+1表示删除，后续simulate时也是先转换成map再模拟拓扑排序执行，在转换map时过滤掉依赖于自己的边即可
-		for i, from := range block.Dag.Vertexes[edge.To].Neighbors {
+		for i, from := range dag.Vertexes[edge.To].Neighbors {
 			if from == edge.From {
-				block.Dag.Vertexes[edge.To].Neighbors[i] = uint32(txCount) + 1
+				dag.Vertexes[edge.To].Neighbors[i] = uint32(txCount) + 1
 				break
 			}
 		}
 	}
-}
 
+	return dag
+}

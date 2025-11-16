@@ -20,9 +20,8 @@ import (
 )
 
 type SnapshotEvidence struct {
-	delegate      *SnapshotImpl
-	log           protocol.Logger
-	staleReadKeys []string
+	delegate *SnapshotImpl
+	log      protocol.Logger
 }
 
 // GetBlockFingerprint returns current block fingerprint
@@ -124,11 +123,11 @@ func (s *SnapshotEvidence) GetKey(txExecSeq int, contractName string, key []byte
 // After the read-write set is generated, add TxSimContext to the snapshot
 // return if apply successfully or not, and current applied tx num
 func (s *SnapshotEvidence) ApplyTxSimContext(txSimContext protocol.TxSimContext, specialTxType protocol.ExecOrderTxType,
-	runVmSuccess bool, withSpecialTx bool, _controllers interface{}) (bool, int) {
+	runVmSuccess bool, withSpecialTx bool) (bool, int) {
 	if s.delegate == nil {
 		return false, -1
 	}
-	return s.delegate.ApplyTxSimContext(txSimContext, specialTxType, runVmSuccess, withSpecialTx, _controllers)
+	return s.delegate.ApplyTxSimContext(txSimContext, specialTxType, runVmSuccess, withSpecialTx)
 }
 
 // check if snapshot is sealed
@@ -162,19 +161,6 @@ func (s *SnapshotEvidence) Seal() {
 		return
 	}
 	s.delegate.Seal()
-}
-
-// AddStaleReadKey 记录发生陈旧读的 key
-func (s *SnapshotEvidence) AddStaleReadKey(key string) {
-	if s.staleReadKeys == nil {
-		s.staleReadKeys = make([]string, 0)
-	}
-	s.staleReadKeys = append(s.staleReadKeys, key)
-}
-
-// GetStaleReadKeys 获取所有陈旧读的 Key
-func (s *SnapshotEvidence) GetStaleReadKeys() []string {
-	return s.staleReadKeys
 }
 
 // According to the read-write table, the read-write dependency is checked from back to front to determine whether

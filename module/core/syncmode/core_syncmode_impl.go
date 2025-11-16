@@ -27,7 +27,7 @@ import (
 
 // CoreEngine is a block handle engine.
 // One core engine for one chain.
-// nolint: structcheck,unused
+//nolint: structcheck,unused
 type CoreEngine struct {
 	chainId   string             // chainId, identity of a chain
 	chainConf protocol.ChainConf // chain config
@@ -166,7 +166,7 @@ func (c *CoreEngine) OnMessage(message *msgbus.Message) {
 		if proposeStatus, ok := message.Payload.(bool); ok {
 			c.blockProposer.OnReceiveProposeStatusChange(proposeStatus)
 		}
-	case msgbus.VerifyBlock: // ZYF 这里从节点收到来自主节点的block消息，其中携带了主节点执行完交易后得到的DAG图，从节点调用simulatewithdag方法去handleTx
+	case msgbus.VerifyBlock:
 		go func() {
 			if block, ok := message.Payload.(*commonpb.Block); ok {
 				c.BlockVerifier.VerifyBlock(block, protocol.CONSENSUS_VERIFY) //nolint: errcheck

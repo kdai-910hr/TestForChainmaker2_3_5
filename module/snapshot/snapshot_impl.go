@@ -8,7 +8,6 @@ SPDX-License-Identifier: Apache-2.0
 package snapshot
 
 import (
-	"chainmaker.org/chainmaker-go/module/core/common/switch_control"
 	"encoding/json"
 	"fmt"
 	"sync"
@@ -69,12 +68,9 @@ type SnapshotImpl struct {
 	txRoot    []byte
 	dagHash   []byte
 	rwSetHash []byte
-
 	//wzy
 	//存储注入的读写集
 	AUXRwMap map[string][]sv
-	//lhl
-	staleReadKeys []string // ✅ 新增字段
 }
 
 // NewQuerySnapshot create a snapshot for query tx
@@ -134,14 +130,6 @@ func (s *SnapshotImpl) SetPreSnapshot(snapshot protocol.Snapshot) {
 // GetBlockchainStore return the blockchainStore of the snapshot
 func (s *SnapshotImpl) GetBlockchainStore() protocol.BlockchainStore {
 	return s.blockchainStore
-}
-
-func (s *SnapshotImpl) AddStaleReadKey(key string) {
-	if s.staleReadKeys == nil {
-		s.staleReadKeys = make([]string, 0)
-	}
-	s.staleReadKeys = append(s.staleReadKeys, key)
-	s.log.Warnf("✅ 成功添加 StaleReadKey：%s", key)
 }
 
 // GetLastChainConfig return the last chain config
@@ -276,18 +264,13 @@ func (s *SnapshotImpl) GetKeys(txExecSeq int, keys []*vmPb.BatchKey) ([]*vmPb.Ba
 	//	txExecSeq = snapshotSize //nolint: ineffassign, staticcheck
 	//}
 	//wzy
-	enableDAGPartial := s.AUXRwMap != nil
-	if enableDAGPartial {
+	if s.AUXRwMap != nil {
 		if AUXRwValues, emptyAUXRwKeys, done = s.getBatchFromAUXRwMap(keys, txExecSeq); done {
 			return writeSetValues, nil
 		}
-		if writeSetValues, emptyWriteSetKeys, done = s.getBatchFromWriteSet(emptyAUXRwKeys); done {
-			return writeSetValues, nil
-		}
-	} else {
-		if writeSetValues, emptyWriteSetKeys, done = s.getBatchFromWriteSet(keys); done {
-			return writeSetValues, nil
-		}
+	}
+	if writeSetValues, emptyWriteSetKeys, done = s.getBatchFromWriteSet(emptyAUXRwKeys); done {
+		return writeSetValues, nil
 	}
 
 	if readSetValues, emptyReadSetKeys, done = s.getBatchFromReadSet(emptyWriteSetKeys); done {
@@ -306,12 +289,7 @@ func (s *SnapshotImpl) GetKeys(txExecSeq int, keys []*vmPb.BatchKey) ([]*vmPb.Ba
 	if err != nil {
 		return nil, err
 	}
-	if enableDAGPartial {
-		return append(objects, append(value, append(readSetValues, append(writeSetValues, AUXRwValues...)...)...)...), nil
-	} else {
-		return append(objects, append(value, append(readSetValues, writeSetValues...)...)...), nil
-	}
-
+	return append(objects, append(value, append(readSetValues, append(writeSetValues, AUXRwValues...)...)...)...), nil
 }
 
 // getObjects returns objects on given keys
@@ -387,15 +365,10 @@ func (s *SnapshotImpl) getBatchFromReadSet(keys []*vmPb.BatchKey) ([]*vmPb.Batch
 
 // ApplyTxSimContext add TxSimContext to the snapshot, return current applied tx num whether success of not
 func (s *SnapshotImpl) ApplyTxSimContext(txSimContext protocol.TxSimContext, specialTxType protocol.ExecOrderTxType,
-	runVmSuccess bool, applySpecialTx bool, _controllers interface{}) (bool, int) {
-	enableBatch := false
-	enableStale := false
-	if controllers, ok := _controllers.(*switch_control.SwitchControllerImpl); ok {
-		enableBatch = controllers.IsEnabled(switch_control.PartDAGControl)
-		enableStale = controllers.IsEnabled(switch_control.StaleControl)
-	}
+	runVmSuccess bool, applySpecialTx bool) (bool, int) {
 	//wzy
 	if s.AUXRwMap != nil {
+		s.log.Debug("applyTxSimContextWithOrder")
 		return s.applyTxSimContextWithOrder(txSimContext, specialTxType, runVmSuccess, applySpecialTx)
 	}
 
@@ -406,6 +379,7 @@ func (s *SnapshotImpl) ApplyTxSimContext(txSimContext protocol.TxSimContext, spe
 	})
 
 	if !applySpecialTx && s.IsSealed() {
+		s.log.Error("snapshot is sealed")
 		return false, s.GetSnapshotSize()
 	}
 	// 乐观处理，以所有交易都不冲突的情况进行优先处理
@@ -413,74 +387,29 @@ func (s *SnapshotImpl) ApplyTxSimContext(txSimContext protocol.TxSimContext, spe
 	var txRWSet *commonPb.TxRWSet
 	var txResult *commonPb.Result
 
-	if enableBatch {
-		s.log.Info("-------------执行到批处理交易调度代码部分---------")
-	}
 	// Only when the virtual machine is running normally can the read-write set be saved, or write fake conflicted key
 	txRWSet = txSimContext.GetTxRWSet(runVmSuccess)
 	s.log.Debugf("【gas calc】%v, ApplyTxSimContext, txRWSet = %v", txSimContext.GetTx().Payload.TxId, txRWSet)
 	txResult = txSimContext.GetTxResult()
 	// 实现准备好要处理的数据
 	finalReadKvs := make(map[string]*sv, len(txRWSet.TxReads))
-	if !enableBatch {
-		for _, txRead := range txRWSet.TxReads {
-			finalKey := constructKey(txRead.ContractName, txRead.Key)
-			// 乐观检查，便于提前发现冲突
-			if sv, ok := s.writeTable.getByLock(finalKey); ok {
-				// WJY: 对于 txRWSet.TxReads 中的每一个读操作
-				// WJY: 若存在相同键且执行序列更高的写操作，则发生冲突，返回 false
-				if sv.seq >= txExecSeq {
-					s.log.Debugf("Key Conflicted %+v-%+v, tx id:%s", sv.seq, txExecSeq, tx.Payload.TxId)
-					if enableStale {
-						// 在这里加日志
-						s.log.Warnf("[STALEREAD-DETECT] txid=%s detected stale-read on key=%s, sv.seq=%d, txExecSeq=%d",
-							tx.Payload.TxId, finalKey, sv.seq, txExecSeq)
-						s.AddStaleReadKey(finalKey) // 记录要回滚的 key
-					}
-					return false, len(s.txTable) + len(s.specialTxTable)
-				}
+	for _, txRead := range txRWSet.TxReads {
+		finalKey := constructKey(txRead.ContractName, txRead.Key)
+		// 乐观检查，便于提前发现冲突
+		if sv, ok := s.writeTable.getByLock(finalKey); ok {
+			if sv.seq >= txExecSeq {
+				s.log.Warnf("Key Conflicted %+v-%+v, tx id:%s", sv.seq, txExecSeq, tx.Payload.TxId)
+				return false, len(s.txTable) + len(s.specialTxTable)
 			}
-			finalReadKvs[finalKey] = &sv{
-				value: txRead.Value,
-			}
+		}
+		finalReadKvs[finalKey] = &sv{
+			value: txRead.Value,
 		}
 	}
 	finalWriteKvs := make(map[string]*sv, len(txRWSet.TxWrites))
-	if enableBatch {
-		//比较交易id大小用交易执行的序号txExecSeq,tx.payload.TxId是字符串不好比较
-		//提交阶段冲突检查，写写不提交，读写和写读可以提交
-		//写写冲突返回false，其余冲突可以提交
-		//检查是否存在WAW冲突
-		for _, txWrite := range txRWSet.TxWrites {
-			finalKey := constructKey(txWrite.ContractName, txWrite.Key)
-			if sv, ok := s.writeTable.getByLock(finalKey); ok {
-				if sv.seq >= txExecSeq {
-					fmt.Println("存在WAW冲突")
-					s.log.Debugf("Key Conflicted %+v-%+v, tx id:%s", sv.seq, txExecSeq, tx.Payload.TxId)
-					return false, len(s.txTable) + len(s.specialTxTable)
-				}
-			}
-		}
-
-		//重排序算法，只要有WAR和RAW一种不冲突即可提交
-		if !(hasWARConflicts(txExecSeq, txRWSet, s.readTable) == false ||
-			hasRAWConflicts(txExecSeq, txRWSet, s.writeTable) == false) {
-			fmt.Println("存在冲突，不提交")
-			s.log.Debugf("has conflicts with RAW or WAR, not install")
-			return false, len(s.txTable) + len(s.specialTxTable)
-		}
-
-		//没有冲突才可以生效结果
-		//放到所有检查的最后面，对应install函数
-	}
 	// Append to write table
 	for _, txWrite := range txRWSet.TxWrites {
 		finalKey := constructKey(txWrite.ContractName, txWrite.Key)
-		if enableBatch {
-			//写写不冲突直接生效交易结果
-			fmt.Println("提交结果")
-			s.log.Debugf("tx id:%s 生效", tx.Payload.TxId)
-		}
 		finalWriteKvs[finalKey] = &sv{
 			value: txWrite.Value,
 		}
@@ -490,6 +419,7 @@ func (s *SnapshotImpl) ApplyTxSimContext(txSimContext protocol.TxSimContext, spe
 	defer s.lock.Unlock()
 	// it is necessary to check sealed secondly
 	if !applySpecialTx && s.IsSealed() {
+		s.log.Error("snapshot is sealed 2ed")
 		return false, s.GetSnapshotSize()
 	}
 
@@ -508,18 +438,8 @@ func (s *SnapshotImpl) ApplyTxSimContext(txSimContext protocol.TxSimContext, spe
 	start := time.Now()
 	for finalKey := range finalReadKvs {
 		if sv, ok := s.writeTable.getByLock(finalKey); ok {
-			// WJY: 遍历 finalReadKvs 中的每个键，检查是否已被 writeTable 中的更新覆盖。
-			// WJY: 如果有冲突，则返回 false
-			if enableStale {
-				if sv.seq >= txExecSeq {
-					s.log.Debugf("Key Conflicted %+v-%+v, tx id:%s", sv.seq, txExecSeq, tx.Payload.TxId)
-					s.log.Warnf("⚠️ [%s] Detected Stale Read Key: %s", txSimContext.GetTx().Payload.TxId, finalKey)
-					// 记录发生 Stale Read 的 key
-					s.AddStaleReadKey(finalKey)
-					return false, s.GetSnapshotSize() + len(s.specialTxTable)
-				}
-			} else if enableBatch && sv.seq >= txExecSeq {
-				s.log.Debugf("Key Conflicted %+v-%+v, tx id:%s", sv.seq, txExecSeq, tx.Payload.TxId)
+			if sv.seq >= txExecSeq {
+				s.log.Warnf("Key Conflicted %+v-%+v, tx id:%s", sv.seq, txExecSeq, tx.Payload.TxId)
 				return false, s.GetSnapshotSize() + len(s.specialTxTable)
 			}
 		}
@@ -541,6 +461,7 @@ func (s *SnapshotImpl) applyTxSimContextWithOrder(txSimContext protocol.TxSimCon
 	})
 
 	if !applySpecialTx && s.IsSealed() {
+		s.log.Error("snapshot is sealed")
 		return false, s.GetSnapshotSize()
 	}
 	// 乐观处理，以所有交易都不冲突的情况进行优先处理
@@ -600,6 +521,7 @@ func (s *SnapshotImpl) applyTxSimContextWithOrder(txSimContext protocol.TxSimCon
 	defer s.lock.Unlock()
 	// it is necessary to check sealed secondly
 	if !applySpecialTx && s.IsSealed() {
+		s.log.Error("snapshot is sealed 2ed")
 		return false, s.GetSnapshotSize()
 	}
 
@@ -630,28 +552,6 @@ func (s *SnapshotImpl) applyTxSimContextWithOrder(txSimContext protocol.TxSimCon
 	s.log.Debugf("tx [%+v] final readKVs is %+v, writeKvs is %+v", txExecSeq, finalReadKvs, finalWriteKvs)
 	s.applyOptimizeWithOrder(tx, txRWSet, txResult, runVmSuccess, finalReadKvs, finalWriteKvs, txExecSeq)
 	return true, s.GetSnapshotSize()
-}
-
-// 检查是否有WAR冲突
-func hasWARConflicts(txExecSeq int, TxRWSet *commonPb.TxRWSet, reservations *ShardSet) bool {
-	for _, txWrite := range TxRWSet.TxWrites {
-		key := constructKey(txWrite.ContractName, txWrite.Key)
-		if sv, ok := reservations.getByLock(key); ok && sv.seq < txExecSeq {
-			return true
-		}
-	}
-	return false
-}
-
-// 检查是否有RAW冲突
-func hasRAWConflicts(txExecSeq int, TxRWSet *commonPb.TxRWSet, reservations *ShardSet) bool {
-	for _, txRead := range TxRWSet.TxReads {
-		key := constructKey(txRead.ContractName, txRead.Key)
-		if sv, ok := reservations.getByLock(key); ok && sv.seq < txExecSeq {
-			return true
-		}
-	}
-	return false
 }
 
 // ApplyBlock apply tx rwset map to block
@@ -869,7 +769,8 @@ func (s *SnapshotImpl) BuildDAG(isSql bool, txRWSetTable []*commonPb.TxRWSet) *c
 		txRWSets = txRWSetTable
 	}
 	txCount := uint32(len(txRWSets))
-	s.log.Infof("start to build DAG for block %d with %d txs", s.blockHeight, txCount)
+	// s.log.Infof("start to build DAG for block %d with %d txs", s.blockHeight, txCount)
+	// s.log.Infof("begin build dag for %+v", s.txRWSetTable)
 	dag := &commonPb.DAG{}
 	if txCount == 0 {
 		return dag
@@ -946,7 +847,7 @@ func (s *SnapshotImpl) buildReachMap(i uint32, txRWSet *commonPb.TxRWSet, readKe
 	allReachForI := &bitmap.Bitmap{}
 	allReachForI.Set(int(i))
 	directReachForI := &bitmap.Bitmap{}
-	enableDAGPartial := s.AUXRwMap != nil
+
 	//ReadSet && WriteSet conflict
 	for _, keyForI := range readTableItemForI {
 		readKey := string(keyForI.Key)
@@ -956,7 +857,7 @@ func (s *SnapshotImpl) buildReachMap(i uint32, txRWSet *commonPb.TxRWSet, readKe
 		}
 		// just check 1 write key before the tx because write keys all are conflict
 		j := int(writePos[i][readKey]) - 1
-		if j >= 0 && (!enableDAGPartial && !allReachForI.Has(int(writeKeyTxs[j])) || enableDAGPartial) {
+		if j >= 0 {
 			//if j >= 0 && !allReachForI.Has(int(writeKeyTxs[j])) {
 			directReachForI.Set(int(writeKeyTxs[j]))
 			allReachForI.Or(reachMap[writeKeyTxs[j]])
