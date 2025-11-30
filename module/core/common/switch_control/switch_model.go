@@ -36,7 +36,7 @@ var GlobalModel = ModelParams{
 		{-0.10112615654646209, 1.1142124352080796, 1.1434502538976794, 1.128408826698107, 1.128408826698107, 0.02028330004590362, 0.01412962288533881, 0.0, 0.0},
 	},
 	Intercepts: []float64{-0.018464373191848755, -0.8960187300376167, 0.7884847363385492, 0.12599836689091418},
-	AlgoNames:  []ControlType{DEFAULTControl, BatchControl, PartDAGControl, StaleControl},
+	AlgoNames:  []ControlType{DEFAULTControl, PartDAGControl, BatchControl, StaleControl},
 }
 
 func ExtractDAGFeaturesParallel(dag *commonPb.DAG) []float64 {

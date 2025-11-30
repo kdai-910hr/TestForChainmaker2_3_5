@@ -172,19 +172,6 @@ func (s *SnapshotEvidence) Seal() {
 	s.delegate.Seal()
 }
 
-// AddStaleReadKey 记录发生陈旧读的 key
-func (s *SnapshotEvidence) AddStaleReadKey(key string) {
-	if s.staleReadKeys == nil {
-		s.staleReadKeys = make([]string, 0)
-	}
-	s.staleReadKeys = append(s.staleReadKeys, key)
-}
-
-// GetStaleReadKeys 获取所有陈旧读的 Key
-func (s *SnapshotEvidence) GetStaleReadKeys() []string {
-	return s.staleReadKeys
-}
-
 // According to the read-write table, the read-write dependency is checked from back to front to determine whether
 // the transaction can be executed concurrently.
 // From the process of building the read-write table, we have known that every transaction is based on a known

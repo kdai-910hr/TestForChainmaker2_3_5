@@ -735,9 +735,9 @@ func (ts *TxScheduler) SimulateWithDag(block *commonPb.Block, snapshot protocol.
 	defer ts.lock.Unlock()
 
 	defer ts.releaseContractCache()
-	// strategy, _ := strconv.Atoi(string(block.AdditionalData.ExtraData["TBFTAdditionalDataSchedule"]))
-	ts.switchController.TryEnable(switch_control.ControlType(2))
-	ts.log.Infof("ZYF using strategy " + strconv.Itoa(int(2)) + "!")
+	strategy, _ := strconv.Atoi(string(block.AdditionalData.ExtraData["TBFTAdditionalDataSchedule"]))
+	ts.switchController.TryEnable(switch_control.ControlType(strategy))
+	ts.log.Infof("ZYF using strategy " + strconv.Itoa(strategy) + "!")
 	var (
 		startTime  = time.Now()
 		txRWSetMap = make(map[string]*commonPb.TxRWSet, len(block.Txs))
@@ -762,7 +762,7 @@ func (ts *TxScheduler) SimulateWithDag(block *commonPb.Block, snapshot protocol.
 
 	// Construct the adjacency list of dag, which describes the subsequent adjacency transactions of all transactions
 	dag := block.Dag
-	if strategy == 2 {
+	if strategy == int(switch_control.PartDAGControl) {
 		if _dag := ts.cutDAG(block); _dag != nil {
 			dag = _dag
 		}

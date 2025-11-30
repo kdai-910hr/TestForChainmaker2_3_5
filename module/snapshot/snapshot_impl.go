@@ -8,6 +8,7 @@ SPDX-License-Identifier: Apache-2.0
 package snapshot
 
 import (
+	"bytes"
 	"chainmaker.org/chainmaker-go/module/core/common/switch_control"
 	"encoding/json"
 	"fmt"
@@ -557,10 +558,11 @@ func (s *SnapshotImpl) ApplyTxSimContext(txSimContext protocol.TxSimContext, spe
 		}
 	} else {
 		for finalKey := range finalReadKvs {
-		if sv, ok := s.writeTable.getByLock(finalKey); ok {
-			if sv.seq >= txExecSeq {
-				s.log.Debugf("Key Conflicted %+v-%+v, tx id:%s", sv.seq, txExecSeq, tx.Payload.TxId)
-				return false, s.GetSnapshotSize() + len(s.specialTxTable)
+			if sv, ok := s.writeTable.getByLock(finalKey); ok {
+				if sv.seq >= txExecSeq {
+					s.log.Debugf("Key Conflicted %+v-%+v, tx id:%s", sv.seq, txExecSeq, tx.Payload.TxId)
+					return false, s.GetSnapshotSize() + len(s.specialTxTable)
+				}
 			}
 		}
 	}
@@ -676,7 +678,7 @@ func (s *SnapshotImpl) applyTxSimContextWithOrder(txSimContext protocol.TxSimCon
 func hasWARConflicts(txExecSeq int, TxRWSet *commonPb.TxRWSet, reservations *ShardSet) bool {
 	for _, txWrite := range TxRWSet.TxWrites {
 		key := constructKey(txWrite.ContractName, txWrite.Key)
-		if sv, ok := reservations.getByLock(key); ok && sv.seq < txExecSeq {
+		if sv, ok := reservations.getByLock(key); ok && sv.seq >= txExecSeq {
 			return true
 		}
 	}
@@ -687,7 +689,7 @@ func hasWARConflicts(txExecSeq int, TxRWSet *commonPb.TxRWSet, reservations *Sha
 func hasRAWConflicts(txExecSeq int, TxRWSet *commonPb.TxRWSet, reservations *ShardSet) bool {
 	for _, txRead := range TxRWSet.TxReads {
 		key := constructKey(txRead.ContractName, txRead.Key)
-		if sv, ok := reservations.getByLock(key); ok && sv.seq < txExecSeq {
+		if sv, ok := reservations.getByLock(key); ok && sv.seq >= txExecSeq {
 			return true
 		}
 	}

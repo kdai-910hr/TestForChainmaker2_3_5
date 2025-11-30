@@ -11,15 +11,15 @@ type ControlType int
 // 当前支持的控制类型
 const (
 	DEFAULTControl ControlType = iota
-	BatchControl
 	PartDAGControl
+	BatchControl
 	StaleControl
 )
 
 var allControlType = []ControlType{
 	DEFAULTControl,
-	BatchControl,
 	PartDAGControl,
+	BatchControl,
 	StaleControl,
 }
 
